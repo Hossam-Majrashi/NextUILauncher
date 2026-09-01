@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -56,9 +57,14 @@ data class LauncherUiState(
     val query: String = "",
     val pinned: ImmutableList<LauncherItemEntity> = persistentListOf(),
     val folders: ImmutableList<FolderEntity> = persistentListOf(),
+    /** Search results when searching; same as [drawerPagedApps] otherwise. */
     val pagedApps: ImmutableList<ImmutableList<LauncherItemEntity>> = persistentListOf(),
+    /** Drawer pages — stable, NEVER changes during search. Used by the pager. */
+    val drawerPagedApps: ImmutableList<ImmutableList<LauncherItemEntity>> = persistentListOf(),
     val recycleApps: ImmutableList<LauncherItemEntity> = persistentListOf(),
     val pageCount: Int = 1,
+    /** Drawer page count — stable, NEVER changes during search. Used by pager state. */
+    val drawerPageCount: Int = 1,
     val hideAppsInFolders: Boolean = false
 )
 
@@ -83,18 +89,18 @@ private data class CoreInputs(
  * LauncherViewModel — reactive, background-first state pipeline.
  *
  * ── Architecture ────────────────────────────────────────────────────────────
- * There is exactly ONE derivation path:
+ * Two-tier derivation keeps search instant while heavy work is cached:
  *
  *   repository flows ─┐
- *   query (echo)      ─┼─► combine ─► computeState() ─► uiState
- *   query (debounced) ─┤        (Dispatchers.Default)
- *   flags             ─┘
+ *   flags             ─┴─► combine ─► computeBaseState() ─► baseState (cached)
+ *                                                              │
+ *   _query (instant)  ──────────────────────────► combine ─► applyQuery() ─► uiState
  *
- * • Mutations (pin, hide, move, …) ONLY write to the repository; the UI
- *   reacts through the flows. No manual state rebuilding, ever — which means
- *   no full-screen recomposition storms and no stale copies.
- * • Search keystrokes update [_query] instantly (text-field echo), while the
- *   expensive filtering path consumes a 100 ms-debounced twin of the flow.
+ * • Tier 1 (baseState): categories, folders, pinned, sorted default list — runs
+ *   ONLY when apps/folders/flags change, never on keystrokes.
+ * • Tier 2 (uiState): combines the cached base with the instant query. The
+ *   search filter uses a pre-built lowercase index — zero allocations, instant.
+ * • Mutations ONLY write to the repository; the UI reacts through flows.
  * • Package broadcasts arrive via [LauncherEventBus], are debounced (batch
  *   updates fire dozens of events), and trigger a conflated [refresh].
  * • After first data, pinned apps + the first 3 drawer pages are pre-warmed
@@ -122,6 +128,13 @@ class LauncherViewModel(
      *  loading state alive until real data exists (cold-start gate). */
     private val _initialSyncDone   = MutableStateFlow(false)
 
+    private val collator = Collator.getInstance().apply { strength = Collator.PRIMARY }
+
+    // Pre-lowercased search index: avoids allocating lowercase copies on every
+    // keystroke. Rebuilt only when the app list changes (install/uninstall).
+    @Volatile
+    private var searchIndex = emptyMap<String, Pair<String, String>>()
+
     // ── Outputs ──────────────────────────────────────────────────────────────
 
     private val flags = combine(
@@ -134,17 +147,23 @@ class LauncherViewModel(
         repository.getAll(), repository.getFolders(), _initialSyncDone, flags
     ) { apps, folders, syncDone, f -> CoreInputs(apps, folders, syncDone, f) }
 
-    /** Echo query: immediate, drives the text field. */
-    private val echoedQuery = _query
+    /** Tier 1: heavy computation cached — only reruns on app/folder/flag changes. */
+    private val baseState: StateFlow<BaseState> =
+        coreInputs
+            .map { computeBaseState(it) }
+            .flowOn(Dispatchers.Default)
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5_000),
+                initialValue = BaseState()
+            )
 
-    /** Effective query: debounced, drives filtering. Blank clears instantly. */
-    private val effectiveQuery = _query.debounce { if (it.isBlank()) 0L else 100L }
-
+    /** Tier 2: instant query overlay on the cached base — no debounce. */
     val uiState: StateFlow<LauncherUiState> =
-        combine(coreInputs, echoedQuery, effectiveQuery) { core, echo, effective ->
-            computeState(core, echo, effective)
+        combine(baseState, _query) { base, query ->
+            applyQuery(base, query)
         }
-            .flowOn(Dispatchers.Default)   // all filtering/sorting off the main thread
+            .flowOn(Dispatchers.Default)
             .stateIn(
                 scope = viewModelScope,
                 started = SharingStarted.WhileSubscribed(5_000),
@@ -170,6 +189,18 @@ class LauncherViewModel(
             }
             _initialSyncDone.value = true
             _isRefreshing.value = false
+        }
+
+        // Rebuild the search index whenever the underlying app list changes.
+        viewModelScope.launch {
+            repository.getAll().collect { apps ->
+                searchIndex = apps.associate { app ->
+                    app.componentKey to Pair(
+                        app.label.lowercase(),
+                        app.packageName.lowercase()
+                    )
+                }
+            }
         }
 
         // Package broadcast pipeline: debounce bursts (batch Play-Store
@@ -250,7 +281,8 @@ class LauncherViewModel(
     // ── Search & category selection ──────────────────────────────────────────
 
     fun onSearchChange(query: String) {
-        // Instant echo — the StateFlow conflates rapid keystrokes for free.
+        // Instant — directly drives the lightweight Tier 2 combine.
+        // No debounce: applyQuery() is fast enough (pre-indexed search).
         _query.value = query
     }
 
@@ -290,8 +322,8 @@ class LauncherViewModel(
     }
 
     fun onHomePressed() {
-        _query.value = ""
-        _selectedCategory.value = "All"
+        if (_query.value.isNotEmpty()) _query.value = ""
+        if (_selectedCategory.value != "All") _selectedCategory.value = "All"
         _homeEvents.tryEmit(Unit)
     }
 
@@ -362,23 +394,33 @@ class LauncherViewModel(
         }
     }
 
-    // ── Pure state derivation (runs on Dispatchers.Default) ──────────────────
+    // ── Tier 1: heavy base-state derivation (runs on Dispatchers.Default) ─────
+    //
+    // Everything that does NOT depend on the search query: category extraction,
+    // folder enrichment, default sorted list, pinned list, recycle list.
+    // This is cached and only recomputed when apps/folders/flags change.
 
-    private fun computeState(
-        core: CoreInputs,
-        echoedQuery: String,
-        effectiveQuery: String
-    ): LauncherUiState {
-        val apps   = core.apps
-        val flags  = core.flags
+    /** Pre-computed state independent of the search query. */
+    private data class BaseState(
+        val loading: Boolean = true,
+        val isRefreshing: Boolean = false,
+        val showOnboarding: Boolean = false,
+        val restoreMessage: String? = null,
+        val all: ImmutableList<LauncherItemEntity> = persistentListOf(),
+        val installedApps: List<LauncherItemEntity> = emptyList(),
+        val recycleApps: ImmutableList<LauncherItemEntity> = persistentListOf(),
+        val enrichedFolders: ImmutableList<FolderEntity> = persistentListOf(),
+        val categories: ImmutableList<String> = persistentListOf(),
+        val selectedCategory: String = "All",
+        val pinned: ImmutableList<LauncherItemEntity> = persistentListOf(),
+        val defaultPagedApps: ImmutableList<ImmutableList<LauncherItemEntity>> = persistentListOf(),
+        val defaultPageCount: Int = 1,
+        val hideAppsInFolders: Boolean = false
+    )
 
-        if (effectiveQuery.isNotBlank()) {
-            DiagnosticsLogger.increment(DiagnosticsLogger.Metrics.SEARCH_RUN_COUNT)
-        }
-
-        // Locale-aware collator for proper Arabic+English alphabetical sorting.
-        // PRIMARY strength ignores diacritics (tashkeel) for cleaner ordering.
-        val collator = Collator.getInstance().apply { strength = Collator.PRIMARY }
+    private fun computeBaseState(core: CoreInputs): BaseState {
+        val apps  = core.apps
+        val flags = core.flags
 
         val installedApps = apps.filter { it.isInstalled && !it.isHidden }
         val recycleApps   = apps.filter { !it.isInstalled }
@@ -405,50 +447,100 @@ class LauncherViewModel(
             "All"
         }
 
-        val filteredApps = if (effectiveQuery.isBlank()) {
-            val byCategory = when {
-                selectedCat == "All" -> {
-                    if (flags.hideAppsInFolders) installedApps.filter { it.folderId == null }
-                    else installedApps
-                }
-                enrichedFolders.any { it.name == selectedCat } ->
-                    enrichedFolders.first { it.name == selectedCat }.items
-                else -> installedApps.filter { (it.customCategory ?: it.category) == selectedCat }
+        // Pre-compute the default (no-query) sorted list.
+        val byCategory = when {
+            selectedCat == "All" -> {
+                if (flags.hideAppsInFolders) installedApps.filter { it.folderId == null }
+                else installedApps
             }
-            val pinned   = byCategory.filter { it.isPinned }.sortedBy { it.sortOrder }
-            val unpinned = byCategory.filter { !it.isPinned }.sortedWith(compareBy(collator) { it.label })
-            pinned + unpinned
-        } else {
-            installedApps.filter {
-                it.label.contains(effectiveQuery, ignoreCase = true) ||
-                    it.packageName.contains(effectiveQuery, ignoreCase = true)
-            }.sortedWith(compareBy(collator) { it.label })
+            enrichedFolders.any { it.name == selectedCat } ->
+                enrichedFolders.first { it.name == selectedCat }.items
+            else -> installedApps.filter { (it.customCategory ?: it.category) == selectedCat }
         }
+        val pinned   = byCategory.filter { it.isPinned }.sortedBy { it.sortOrder }
+        val unpinned = byCategory.filter { !it.isPinned }.sortedWith(compareBy(collator) { it.label })
+        val defaultSorted = pinned + unpinned
 
         val appsPerPage = 16
-        val pagedApps = (
-            if (effectiveQuery.isNotBlank()) listOf(filteredApps)
-            else filteredApps.chunked(appsPerPage)
-        ).map { it.toImmutableList() }.toImmutableList()
+        val defaultPaged = defaultSorted.chunked(appsPerPage)
+            .map { it.toImmutableList() }
+            .toImmutableList()
 
-        return LauncherUiState(
+        return BaseState(
             loading            = !core.initialSyncDone,
             isRefreshing       = flags.isRefreshing,
             showOnboarding     = flags.showOnboarding,
             restoreMessage     = flags.restoreMessage,
             all                = apps.toImmutableList(),
+            installedApps      = installedApps,
+            recycleApps        = recycleApps.toImmutableList(),
+            enrichedFolders    = enrichedFolders.toImmutableList(),
             categories         = finalCategories,
             selectedCategory   = selectedCat,
-            query              = echoedQuery,
             pinned             = apps
                 .filter { it.isPinned && it.isInstalled && !it.isHidden }
                 .sortedBy { it.sortOrder }
                 .toImmutableList(),
-            folders            = enrichedFolders.toImmutableList(),
-            pagedApps          = pagedApps,
-            recycleApps        = recycleApps.toImmutableList(),
-            pageCount          = maxOf(1, pagedApps.size),
+            defaultPagedApps   = defaultPaged,
+            defaultPageCount   = maxOf(1, defaultPaged.size),
             hideAppsInFolders  = flags.hideAppsInFolders
+        )
+    }
+
+    // ── Tier 2: instant query overlay (lightweight, no debounce) ─────────────
+    //
+    // Only runs the search filter + chunk when query is non-empty.
+    // When query is empty, returns the pre-computed base state directly.
+
+    private fun applyQuery(base: BaseState, query: String): LauncherUiState {
+        val queryTrimmed = query.trim()
+
+        val searchPagedApps: ImmutableList<ImmutableList<LauncherItemEntity>>
+        val searchPageCount: Int
+
+        if (queryTrimmed.isEmpty()) {
+            // Fast path: use pre-computed paged apps from Tier 1.
+            searchPagedApps = base.defaultPagedApps
+            searchPageCount = base.defaultPageCount
+        } else {
+            DiagnosticsLogger.increment(DiagnosticsLogger.Metrics.SEARCH_RUN_COUNT)
+            // Lightweight filter using pre-built lowercase index.
+            val queryLower = queryTrimmed.lowercase()
+            val idx = searchIndex
+            val filtered = base.installedApps.filter { app ->
+                val cached = idx[app.componentKey]
+                if (cached != null) {
+                    cached.first.contains(queryLower) || cached.second.contains(queryLower)
+                } else {
+                    app.label.contains(queryTrimmed, ignoreCase = true) ||
+                        app.packageName.contains(queryTrimmed, ignoreCase = true)
+                }
+            }.sortedWith(compareBy(collator) { it.label })
+
+            val appsPerPage = 16
+            searchPagedApps = filtered.chunked(appsPerPage)
+                .map { it.toImmutableList() }
+                .toImmutableList()
+            searchPageCount = maxOf(1, searchPagedApps.size)
+        }
+
+        return LauncherUiState(
+            loading            = base.loading,
+            isRefreshing       = base.isRefreshing,
+            showOnboarding     = base.showOnboarding,
+            restoreMessage     = base.restoreMessage,
+            all                = base.all,
+            categories         = base.categories,
+            selectedCategory   = base.selectedCategory,
+            query              = query,
+            pinned             = base.pinned,
+            folders            = base.enrichedFolders,
+            pagedApps          = searchPagedApps,
+            drawerPagedApps    = base.defaultPagedApps,
+            recycleApps        = base.recycleApps,
+            pageCount          = searchPageCount,
+            drawerPageCount    = base.defaultPageCount,
+            hideAppsInFolders  = base.hideAppsInFolders
         )
     }
 

@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -36,10 +37,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -55,6 +63,7 @@ import com.nextui.launcher.ui.components.SwipeHint
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 private const val DEV_NAME  = "Hossam Majrashi"
@@ -97,6 +106,7 @@ fun LauncherScreen(
     val context       = LocalContext.current
     val focusManager  = LocalFocusManager.current
     val navBarPadding = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val coroutineScope = rememberCoroutineScope()
 
     val backupLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/json")
@@ -124,43 +134,50 @@ fun LauncherScreen(
     val colorScheme = if (isDark) darkColorScheme() else lightColorScheme()
 
     // ── Pager setup ───────────────────────────────────────────────────────────
-    // The pager reads the LIVE page count directly. There is intentionally NO
-    // deferred/“stable” page-count copy: deferring meant pageCount could be
-    // written back in the window between a fling settling and the next swipe
-    // starting — mutating pageCount mid-gesture, which cancels the new fling
-    // and snaps the pager back to the previously settled page (the classic
-    // “jumped back one page” bug). Growth mid-scroll is safe (pages append);
-    // the only shrink source (search clear) is gated on settle below.
-    val pagerState = rememberPagerState { 1 + state.pageCount }
+    // Root pager has exactly 2 pages:
+    //  • Page 0: Home page (Clock, Hijri date, Pinned apps, Notes)
+    //  • Page 1: App Drawer (Single unified Search bar, Categories, and App grid pages)
+    val rootPagerState = rememberPagerState { 2 }
+    val drawerPagerState = rememberPagerState { state.drawerPageCount }
 
     LaunchedEffect(homeEvents) {
         homeEvents?.collect {
             focusManager.clearFocus()
-            if (pagerState.currentPage != 0) pagerState.animateScrollToPage(0)
-        }
-    }
-
-    // Clear an active search only once the pager has fully SETTLED on Home.
-    // Using currentPage here would fire mid-fling (it flips at the halfway
-    // threshold while isScrollInProgress is still true), mutating state —
-    // and therefore pageCount — underneath the active gesture.
-    LaunchedEffect(pagerState) {
-        snapshotFlow { pagerState.settledPage }.collect { settled ->
-            if (settled == 0 && state.query.isNotBlank()) {
-                onSearchChange("")
+            if (rootPagerState.currentPage != 0) {
+                rootPagerState.scrollToPage(0)
             }
         }
     }
 
-    // ── Settle-aware icon prefetch (±2 pages around the settled page) ────────
-    LaunchedEffect(pagerState) {
-        snapshotFlow { pagerState.settledPage to state.pagedApps }.collect { (settled, paged) ->
-            val appPage = settled - 1   // page 0 is Home
-            val items = ((appPage - 1)..(appPage + 2))
+    // ── Settle-aware icon prefetch (around the settled drawer page) ──────────
+    LaunchedEffect(drawerPagerState) {
+        snapshotFlow { drawerPagerState.settledPage to state.drawerPagedApps }.collect { (settled, paged) ->
+            val items = ((settled - 2)..(settled + 3))
                 .filter { it in paged.indices }
                 .flatMap { paged[it] }
                 .map { it.componentKey to it.packageName }
             if (items.isNotEmpty()) IconCache.preload(context, items)
+        }
+    }
+
+    val handleBackToHome = remember(coroutineScope, rootPagerState) {
+        {
+            focusManager.clearFocus()
+            onSearchChange("")
+            coroutineScope.launch {
+                rootPagerState.scrollToPage(0)
+            }
+        }
+    }
+
+    BackHandler(enabled = true) {
+        if (state.query.isNotBlank()) {
+            // When searching: clear search and stay in app drawer
+            focusManager.clearFocus()
+            onSearchChange("")
+        } else if (rootPagerState.currentPage != 0) {
+            // When in drawer: back returns to Home
+            handleBackToHome()
         }
     }
 
@@ -187,9 +204,9 @@ fun LauncherScreen(
                 }
 
                 HorizontalPager(
-                    state                   = pagerState,
+                    state                   = rootPagerState,
                     modifier                = Modifier.fillMaxSize(),
-                    beyondViewportPageCount = 2
+                    beyondViewportPageCount = 1
                 ) { page ->
                     if (page == 0) {
                         HomePageContent(
@@ -209,33 +226,27 @@ fun LauncherScreen(
                             onToggleHideAppsInFolders = onToggleHideAppsInFolders
                         )
                     } else {
-                        val pageIndex = page - 1
-                        val pageApps  = state.pagedApps.getOrNull(pageIndex)
-
-                        AppsGridPage(
-                            apps             = pageApps,
-                            recycleApps      = state.recycleApps,
-                            query            = state.query,
-                            categories       = state.categories,
-                            selectedCategory = state.selectedCategory,
-                            onSearchChange   = onSearchChange,
-                            onSelectCategory = onSelectCategory,
-                            navBarPadding    = navBarPadding,
-                            onLaunchApp      = onLaunchApp,
-                            onShowAppMenu    = { menuItem = it },
+                        AppDrawerContent(
+                            state             = state,
+                            drawerPagerState  = drawerPagerState,
+                            navBarPadding     = navBarPadding,
+                            onSearchChange    = onSearchChange,
+                            onSelectCategory  = onSelectCategory,
+                            onLaunchApp       = onLaunchApp,
+                            onShowAppMenu     = { menuItem = it },
                             onShowRecycleMenu = { recycleMenuItem = it },
-                            onOpenInStore    = onOpenInStore
+                            onOpenInStore     = onOpenInStore,
+                            onBackPress       = {
+                                if (state.query.isNotBlank()) {
+                                    focusManager.clearFocus()
+                                    onSearchChange("")
+                                } else {
+                                    handleBackToHome()
+                                }
+                            }
                         )
                     }
                 }
-
-                SwipeHint(
-                    pagerState = pagerState,
-                    modifier   = Modifier
-                        .align(Alignment.BottomCenter)
-                        .navigationBarsPadding()
-                        .padding(bottom = 12.dp)
-                )
             }
 
             // ── Hoisted app-item menu (single shared bottom sheet) ──────────
@@ -784,23 +795,20 @@ private fun HeaderSection(modifier: Modifier = Modifier) {
     }
 }
 
-// ── Apps grid page ────────────────────────────────────────────────────────────
+// ── App Drawer content (Single unified Search bar, Categories, and App grid pages) ────
 @Composable
-private fun AppsGridPage(
-    apps:             ImmutableList<LauncherItemEntity>?,
-    recycleApps:      ImmutableList<LauncherItemEntity>,
-    query:            String,
-    categories:       ImmutableList<String>,
-    selectedCategory: String,
-    onSearchChange:   (String) -> Unit,
-    onSelectCategory: (String) -> Unit,
+private fun AppDrawerContent(
+    state:             LauncherUiState,
+    drawerPagerState:  androidx.compose.foundation.pager.PagerState,
     navBarPadding:    Dp,
+    onSearchChange:    (String) -> Unit,
+    onSelectCategory: (String) -> Unit,
     onLaunchApp:      (LauncherItemEntity) -> Unit,
     onShowAppMenu:    (LauncherItemEntity) -> Unit,
     onShowRecycleMenu: (LauncherItemEntity) -> Unit,
-    onOpenInStore:    (LauncherItemEntity) -> Unit
+    onOpenInStore:    (LauncherItemEntity) -> Unit,
+    onBackPress:       () -> Unit
 ) {
-    val context        = LocalContext.current
     val gridState      = rememberLazyGridState()
     var recycleBinOpen by remember { mutableStateOf(false) }
 
@@ -810,23 +818,26 @@ private fun AppsGridPage(
             .statusBarsPadding()
             .navigationBarsPadding()
     ) {
+        // Single unified search bar (created once, blazing fast, zero duplicate overhead)
         GlobalSearchBar(
-            query             = query,
-            recycleCount      = recycleApps.size,
-            showScrollToBin   = recycleApps.isNotEmpty(),
+            query             = state.query,
+            recycleCount      = state.recycleApps.size,
+            showScrollToBin   = state.recycleApps.isNotEmpty(),
             onSearchChange    = onSearchChange,
-            onRecycleBinClick = { recycleBinOpen = true }
+            onRecycleBinClick = { recycleBinOpen = true },
+            onBackToHome      = onBackPress
         )
 
-        if (query.isBlank() && categories.size > 1) {
+        // Single unified category bar
+        if (state.query.isBlank() && state.categories.size > 1) {
             LazyRow(
                 modifier              = Modifier.fillMaxWidth(),
                 contentPadding        = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(categories) { category ->
+                items(state.categories) { category ->
                     FilterChip(
-                        selected = category == selectedCategory,
+                        selected = category == state.selectedCategory,
                         onClick  = { onSelectCategory(category) },
                         label    = { Text(category) }
                     )
@@ -836,57 +847,122 @@ private fun AppsGridPage(
 
         if (recycleBinOpen) {
             RecycleBinSheet(
-                recycleApps = recycleApps,
+                recycleApps = state.recycleApps,
                 onDismiss   = { recycleBinOpen = false },
                 onOpenStore = onOpenInStore,
                 onShowMenu  = onShowRecycleMenu
             )
         }
 
-        if ((apps == null || apps.isEmpty()) && query.isNotBlank()) {
-            Box(
-                modifier         = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    "No results for '$query'",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+        ) {
+            val isSearching = state.query.isNotBlank()
+
+            // Pager is ALWAYS composed with STABLE data — never torn down,
+            // never changes during search, so clearing search is instant.
+            HorizontalPager(
+                state                   = drawerPagerState,
+                modifier                = Modifier.fillMaxSize(),
+                beyondViewportPageCount = 2,
+                userScrollEnabled       = !isSearching
+            ) { pageIndex ->
+                val pageApps = state.drawerPagedApps.getOrNull(pageIndex)
+                if (pageApps != null) {
+                    LazyVerticalGrid(
+                        columns           = GridCells.Fixed(4),
+                        modifier          = Modifier.fillMaxSize(),
+                        contentPadding    = PaddingValues(
+                            start  = 8.dp,
+                            end    = 8.dp,
+                            top    = 4.dp,
+                            bottom = navBarPadding + 36.dp
+                        ),
+                        verticalArrangement   = Arrangement.spacedBy(4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        items(
+                            items       = pageApps,
+                            key         = { it.componentKey },
+                            contentType = { "app_cell" }
+                        ) { item ->
+                            AppCell(
+                                item       = item,
+                                onLaunch   = onLaunchApp,
+                                onShowMenu = onShowAppMenu
+                            )
+                        }
+
+                        val rem = pageApps.size % 4
+                        if (rem != 0) {
+                            items(count = 4 - rem, contentType = { "app_filler" }) {
+                                Box(Modifier.aspectRatio(0.75f))
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!isSearching && state.drawerPageCount > 1) {
+                SwipeHint(
+                    pagerState = drawerPagerState,
+                    modifier   = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = navBarPadding + 4.dp)
                 )
             }
-        } else if (apps != null) {
-            LazyVerticalGrid(
-                columns           = GridCells.Fixed(4),
-                state             = gridState,
-                modifier          = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                contentPadding    = PaddingValues(
-                    start  = 8.dp,
-                    end    = 8.dp,
-                    top    = 4.dp,
-                    bottom = navBarPadding + 16.dp
-                ),
-                verticalArrangement   = Arrangement.spacedBy(4.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                items(
-                    items       = apps,
-                    key         = { it.componentKey },
-                    contentType = { "app_cell" }
-                ) { item ->
-                    AppCell(
-                        item       = item,
-                        onLaunch   = onLaunchApp,
-                        onShowMenu = onShowAppMenu
-                    )
-                }
 
-                val rem = apps.size % 4
-                if (rem != 0) {
-                    items(count = 4 - rem, contentType = { "app_filler" }) {
-                        Box(Modifier.aspectRatio(0.75f))
+            // Search results overlay — covers the pager visually while active.
+            if (isSearching) {
+                val searchApps = state.pagedApps.flatten()
+                if (searchApps.isEmpty()) {
+                    Box(
+                        modifier         = Modifier
+                            .fillMaxSize()
+                            .background(MaterialTheme.colorScheme.background),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            "No results for '${state.query}'",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                } else {
+                    LazyVerticalGrid(
+                        columns           = GridCells.Fixed(4),
+                        state             = gridState,
+                        modifier          = Modifier
+                            .fillMaxSize()
+                            .background(MaterialTheme.colorScheme.background),
+                        contentPadding    = PaddingValues(
+                            start  = 8.dp,
+                            end    = 8.dp,
+                            top    = 4.dp,
+                            bottom = navBarPadding + 16.dp
+                        ),
+                        verticalArrangement   = Arrangement.spacedBy(4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        items(
+                            items       = searchApps,
+                            key         = { it.componentKey },
+                            contentType = { "app_cell" }
+                        ) { item ->
+                            AppCell(
+                                item       = item,
+                                onLaunch   = onLaunchApp,
+                                onShowMenu = onShowAppMenu
+                            )
+                        }
+
+                        val rem = searchApps.size % 4
+                        if (rem != 0) {
+                            items(count = 4 - rem, contentType = { "app_filler" }) {
+                                Box(Modifier.aspectRatio(0.75f))
+                            }
+                        }
                     }
                 }
             }
@@ -896,29 +972,32 @@ private fun AppsGridPage(
 
 // ── Global search bar ─────────────────────────────────────────────────────────
 //
-// The TextField uses a LOCAL state buffer to avoid the classic Compose
-// controlled-text-field race condition: state.query travels through
-// combine → flowOn(Dispatchers.Default) → stateIn before arriving back
-// as the TextField value. That round-trip delay causes typed characters
-// to flash-disappear and makes deletion unreliable.
-//
-// Local state updates in the SAME frame as the keystroke; the ViewModel
-// is notified in parallel. External changes (e.g. clearing on Home press)
-// sync back via the LaunchedEffect.
+// Uses TextFieldValue to manage exact selection and BiDi text composition,
+// preventing Arabic cursor jumps or character overlapping during recomposition.
 @Composable
 private fun GlobalSearchBar(
     query:             String,
     recycleCount:      Int,
     showScrollToBin:   Boolean,
     onSearchChange:    (String) -> Unit,
-    onRecycleBinClick: () -> Unit
+    onRecycleBinClick: () -> Unit,
+    onBackToHome:      () -> Unit = {}
 ) {
-    // Local buffer: immediate, same-frame update.
-    var localQuery by remember { mutableStateOf(query) }
+    val focusManager = LocalFocusManager.current
 
-    // Sync external → local (Home press clears, restore, etc.).
+    // TextFieldValue preserves cursor position & BiDi composition across recompositions.
+    var textFieldValue by remember {
+        mutableStateOf(TextFieldValue(text = query, selection = TextRange(query.length)))
+    }
+
+    // Sync external changes (Home press, back button clear, etc.).
     LaunchedEffect(query) {
-        if (query != localQuery) localQuery = query
+        if (query != textFieldValue.text) {
+            textFieldValue = TextFieldValue(
+                text = query,
+                selection = TextRange(query.length)
+            )
+        }
     }
 
     Row(
@@ -929,22 +1008,33 @@ private fun GlobalSearchBar(
         verticalAlignment     = Alignment.CenterVertically
     ) {
         OutlinedTextField(
-            value         = localQuery,
+            value         = textFieldValue,
             onValueChange = { newValue ->
-                localQuery = newValue       // Immediate local update (same frame)
-                onSearchChange(newValue)    // Notify ViewModel (async)
+                textFieldValue = newValue
+                onSearchChange(newValue.text)
             },
-            modifier      = Modifier.weight(1f),
+            modifier      = Modifier
+                .weight(1f)
+                .onPreviewKeyEvent { event ->
+                    if (event.key == Key.Back && event.type == KeyEventType.KeyUp) {
+                        onBackToHome()
+                        true
+                    } else false
+                },
             singleLine    = true,
             textStyle     = LocalTextStyle.current.copy(
                 textDirection = TextDirection.Content
             ),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(
+                onSearch = { focusManager.clearFocus() }
+            ),
             leadingIcon   = { Icon(Icons.Rounded.Search, null) },
             trailingIcon  = {
-                if (localQuery.isNotEmpty()) {
+                if (textFieldValue.text.isNotEmpty()) {
                     IconButton(onClick = {
-                        localQuery = ""          // Immediate clear
-                        onSearchChange("")       // Notify ViewModel
+                        textFieldValue = TextFieldValue("", TextRange.Zero)
+                        onSearchChange("")
                     }) {
                         Icon(Icons.Rounded.Clear, "Clear")
                     }

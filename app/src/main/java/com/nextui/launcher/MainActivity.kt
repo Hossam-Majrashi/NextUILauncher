@@ -27,9 +27,24 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private var isActivityResumed = false
+
+    override fun onResume() {
+        super.onResume()
+        isActivityResumed = true
+    }
+
+    override fun onPause() {
+        super.onPause()
+        isActivityResumed = false
+    }
+
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
-        if (intent.action == android.content.Intent.ACTION_MAIN && 
+        // Only jump to Home if the user taps Home while ALREADY in the launcher.
+        // If returning from another app, stay on the exact page they were on (e.g. Page 5 in drawer).
+        if (isActivityResumed &&
+            intent.action == android.content.Intent.ACTION_MAIN && 
             intent.hasCategory(android.content.Intent.CATEGORY_HOME)) {
             viewModel.onHomePressed()
         }
