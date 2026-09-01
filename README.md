@@ -42,6 +42,15 @@
 - **إعدادات متقدمة**: خيارات لتخصيص الواجهة مثل إخفاء تطبيقات المجموعات من القائمة العامة لزيادة التنظيم.
 - **الوضع الليلي والنهاري**: دعم كامل ومنسق لمنظومة Material 3 والتبديل التلقائي حسب وضع النظام.
 
+## 📸 لقطات الشاشة (Screenshots)
+
+> سيتم إضافة الصور هنا بمجرد رفعها على GitHub. يمكنك استبدال الروابط أدناه بصورك الفعلية.
+
+<div align="center">
+  <img src="https://github.com/user-attachments/assets/453707e9-746f-47c6-b90e-17c407a4d306" width="250"/>
+  <img src="https://github.com/user-attachments/assets/7385cd3f-9bae-45e9-95cb-8b8596f14b68" width="250"/>
+  <img src="https://github.com/user-attachments/assets/5bc3503e-2e2f-45b2-a545-c245dd0c9308" width="250"/>
+</div>
 ## 🚀 التثبيت
 
 ### المتطلبات
@@ -74,6 +83,14 @@
 - ✅ **Home Button Logic**: Auto-scroll to page 0 and clear search/focus on Home press.
 - ✅ **Privacy**: Dedicated section to hide sensitive apps and manage folders.
 - ✅ **Material 3**: Modern UI with full Dark/Light mode support and fluid animations.
+
+## 📸 Screenshots
+
+<div align="center">
+  <img src="https://github.com/user-attachments/assets/453707e9-746f-47c6-b90e-17c407a4d306" width="250"/>
+  <img src="https://github.com/user-attachments/assets/7385cd3f-9bae-45e9-95cb-8b8596f14b68" width="250"/>
+  <img src="https://github.com/user-attachments/assets/5bc3503e-2e2f-45b2-a545-c245dd0c9308" width="250"/>
+</div>
 
 ## 🏗️ Technical Stack
 

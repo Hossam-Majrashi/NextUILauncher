@@ -3,6 +3,10 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+kotlin {
+    jvmToolchain(17)
+}
+
 android {
     namespace = "com.nextui.launcher"
     compileSdk = 36
@@ -31,9 +35,26 @@ android {
         targetCompatibility = JavaVersion.VERSION_11
     }
 
+    // Use the locally installed JDK 17 toolchain instead of AGP's default 21
+    // (this machine has no JDK 21 and no network to auto-provision one).
+    java {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(17)
+        }
+    }
+
     buildFeatures {
         compose = true
     }
+}
+
+// ── Compose Compiler stability metrics (Agent 5: QA / skippability gates) ──────
+// Generates per-class stability reports + composable metrics under
+// app/build/compose_reports and app/build/compose_metrics on every build.
+// Verify: all UI models = stable, all cell composables = skippable & restartable.
+composeCompiler {
+    reportsDestination = layout.buildDirectory.dir("compose_reports")
+    metricsDestination = layout.buildDirectory.dir("compose_metrics")
 }
 
 dependencies {
@@ -51,6 +72,7 @@ dependencies {
     implementation(libs.androidx.material.icons.extended)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.kotlinx.collections.immutable)
 
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)

@@ -6,6 +6,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -50,6 +52,23 @@ class LauncherRepository(
             val index = list.indexOfFirst { it.componentKey == item.componentKey }
             if (index != -1) list.toMutableList().apply { set(index, item) }
             else list + item
+        }
+        saveToDisk()
+    }
+
+    /**
+     * Batch upsert: one state emission + one disk write for N items.
+     * Used by pinned-list reordering, which previously triggered N sequential
+     * saves (and N full-state rebuilds) for a single drag gesture.
+     */
+    suspend fun upsertAll(items: List<LauncherItemEntity>) {
+        if (items.isEmpty()) return
+        val byKey = items.associateBy { it.componentKey }
+        _items.update { list ->
+            val keys = byKey.keys
+            val updated = list.map { byKey[it.componentKey] ?: it }
+            val existing = list.mapTo(HashSet()) { it.componentKey }
+            updated + items.filter { it.componentKey !in existing }
         }
         saveToDisk()
     }
@@ -100,12 +119,20 @@ class LauncherRepository(
         }
     }
 
-    private suspend fun saveToDisk() = withContext(Dispatchers.IO) {
-        runCatching {
-            val root = JSONObject()
-            root.put("items", JSONArray(serializeItems(_items.value)))
-            root.put("folders", JSONArray(serializeFolders(_folders.value)))
-            persistenceFile.writeText(root.toString())
+    // Serializes disk writes so concurrent upserts (pin + reorder + hide in
+    // quick succession) never interleave partial JSON or duplicate work.
+    private val saveMutex = Mutex()
+
+    private suspend fun saveToDisk() {
+        saveMutex.withLock {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    val root = JSONObject()
+                    root.put("items", JSONArray(serializeItems(_items.value)))
+                    root.put("folders", JSONArray(serializeFolders(_folders.value)))
+                    persistenceFile.writeText(root.toString())
+                }
+            }
         }
     }
 

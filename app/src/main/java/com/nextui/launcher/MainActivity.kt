@@ -59,7 +59,6 @@ class MainActivity : ComponentActivity() {
                         homeEvents = viewModel.homeEvents,
                         onSearchChange = viewModel::onSearchChange,
                         onSelectCategory = viewModel::onSelectCategory,
-                        onRefresh = viewModel::refresh,
                         onTogglePinned = viewModel::togglePinned,
                         onMovePinned = viewModel::movePinned,
                         onSetCustomCategory = viewModel::setCustomCategory,
@@ -70,9 +69,9 @@ class MainActivity : ComponentActivity() {
                         onOpenInStore = viewModel::openInStore,
                         onToggleHidden = viewModel::toggleHidden,
                         onCreateFolder = viewModel::createFolder,
-                        onDeleteFolder = viewModel::deleteFolder,
                         onMoveToFolder = viewModel::moveToFolder,
-                        onToggleHideAppsInFolders = viewModel::setHideAppsInFolders
+                        onToggleHideAppsInFolders = viewModel::setHideAppsInFolders,
+                        onRestoreMessageShown = viewModel::onRestoreMessageShown
                     )
                 }
             }

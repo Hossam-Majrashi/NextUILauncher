@@ -1,25 +1,14 @@
 package com.nextui.launcher.ui
 
-import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -28,52 +17,44 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerDefaults
+import androidx.compose.foundation.pager.PagerSnapDistance
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.*
+import androidx.compose.material.icons.automirrored.rounded.Label
+import androidx.compose.material.icons.automirrored.rounded.LabelOff
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nextui.launcher.DiagnosticsLogger
-import com.nextui.launcher.data.FolderEntity
 import com.nextui.launcher.data.IconCache
 import com.nextui.launcher.data.LauncherItemEntity
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
+import com.nextui.launcher.ui.components.AppCell
+import com.nextui.launcher.ui.components.AppIcon
+import com.nextui.launcher.ui.components.PinnedAppsList
+import com.nextui.launcher.ui.components.RecycleCell
+import com.nextui.launcher.ui.components.SwipeHint
+import kotlinx.collections.immutable.ImmutableList
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import kotlin.math.roundToInt
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 private const val DEV_NAME  = "Hossam Majrashi"
@@ -81,45 +62,56 @@ private const val DEV_EMAIL = "hossam.majrashi@gmail.com"
 private const val DEV_WEB   = "https://hossam-majrashi.github.io/Works/"
 
 // ── Root screen ───────────────────────────────────────────────────────────────
+//
+// Performance architecture (see OPTIMIZATION_PROMPT):
+//  • ALL item menus/dialogs are hoisted here: the entire grid renders ZERO
+//    DropdownMenu/AlertDialog instances. One long-press → one shared sheet.
+//  • The pager never busy-waits; page-count changes apply after the current
+//    scroll settles via a snapshotFlow suspension (no 16 ms polling loop).
+//  • Icon prefetch is settle-aware: whenever the pager settles, ±2 adjacent
+//    pages are pre-warmed into the icon cache (velocity-tolerant window).
+//  • Package broadcasts are handled app-wide (LauncherApp → EventBus → VM),
+//    not here — this composable has no receiver to leak.
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun LauncherScreen(
-    stateFlow:           StateFlow<LauncherUiState>,
-    homeEvents:          kotlinx.coroutines.flow.SharedFlow<Unit>? = null,
-    onSearchChange:      (String) -> Unit,
-    onSelectCategory:    (String) -> Unit,
-    onRefresh:           () -> Unit,
-    onTogglePinned:      (LauncherItemEntity) -> Unit,
-    onMovePinned:        (Int, Int) -> Unit,
-    onSetCustomCategory: (LauncherItemEntity, String?) -> Unit,
-    onLaunchApp:         (LauncherItemEntity) -> Unit,
-    onBackup:            (Uri) -> Unit,
-    onRestore:           (Uri) -> Unit,
-    onRemoveItem:        (LauncherItemEntity) -> Unit,
-    onOpenInStore:       (LauncherItemEntity) -> Unit,
-    onToggleHidden:      (LauncherItemEntity) -> Unit,
-    onCreateFolder:      (String) -> Unit,
-    onDeleteFolder:      (String) -> Unit,
-    onMoveToFolder:      (LauncherItemEntity, String?) -> Unit,
-    onToggleHideAppsInFolders: (Boolean) -> Unit
+    stateFlow:              StateFlow<LauncherUiState>,
+    homeEvents:             SharedFlow<Unit>? = null,
+    onSearchChange:         (String) -> Unit,
+    onSelectCategory:       (String) -> Unit,
+    onTogglePinned:         (LauncherItemEntity) -> Unit,
+    onMovePinned:           (Int, Int) -> Unit,
+    onSetCustomCategory:    (LauncherItemEntity, String?) -> Unit,
+    onLaunchApp:            (LauncherItemEntity) -> Unit,
+    onBackup:               (Uri) -> Unit,
+    onRestore:              (Uri) -> Unit,
+    onRemoveItem:           (LauncherItemEntity) -> Unit,
+    onOpenInStore:          (LauncherItemEntity) -> Unit,
+    onToggleHidden:         (LauncherItemEntity) -> Unit,
+    onCreateFolder:         (String) -> Unit,
+    onMoveToFolder:         (LauncherItemEntity, String?) -> Unit,
+    onToggleHideAppsInFolders: (Boolean) -> Unit,
+    onRestoreMessageShown:  () -> Unit
 ) {
-    val state        by stateFlow.collectAsStateWithLifecycle()
+    val state         by stateFlow.collectAsStateWithLifecycle()
     val context       = LocalContext.current
     val focusManager  = LocalFocusManager.current
-    val scope         = rememberCoroutineScope()
     val navBarPadding = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
 
-    val backupLauncher  = rememberLauncherForActivityResult(
+    val backupLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/json")
     ) { uri -> uri?.let(onBackup) }
     val restoreLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri -> uri?.let(onRestore) }
 
-    var diagnosticsOpen by remember { mutableStateOf(false) }
-    var hiddenAppsOpen  by remember { mutableStateOf(false) }
-    var indicatorWidth  by remember { mutableIntStateOf(0) }
-    var isScrubbing     by remember { mutableStateOf(false) }
+    // ── Hoisted contextual UI state (ONE menu/sheet for the whole screen) ────
+    var menuItem           by remember { mutableStateOf<LauncherItemEntity?>(null) }
+    var recycleMenuItem    by remember { mutableStateOf<LauncherItemEntity?>(null) }
+    var categoryDialogItem by remember { mutableStateOf<LauncherItemEntity?>(null) }
+    var folderPickerItem   by remember { mutableStateOf<LauncherItemEntity?>(null) }
+    var diagnosticsOpen    by remember { mutableStateOf(false) }
+    var hiddenAppsOpen     by remember { mutableStateOf(false) }
 
     val prefs     = remember { context.getSharedPreferences("launcher_prefs", Context.MODE_PRIVATE) }
     var themeMode by remember { mutableIntStateOf(prefs.getInt("theme_mode", 0)) }
@@ -132,42 +124,43 @@ fun LauncherScreen(
     val colorScheme = if (isDark) darkColorScheme() else lightColorScheme()
 
     // ── Pager setup ───────────────────────────────────────────────────────────
-    val livePageCount   = 1 + state.pageCount
-    var stablePageCount by remember { mutableIntStateOf(livePageCount) }
-    val pagerState      = rememberPagerState { stablePageCount }
+    // The pager reads the LIVE page count directly. There is intentionally NO
+    // deferred/“stable” page-count copy: deferring meant pageCount could be
+    // written back in the window between a fling settling and the next swipe
+    // starting — mutating pageCount mid-gesture, which cancels the new fling
+    // and snaps the pager back to the previously settled page (the classic
+    // “jumped back one page” bug). Growth mid-scroll is safe (pages append);
+    // the only shrink source (search clear) is gated on settle below.
+    val pagerState = rememberPagerState { 1 + state.pageCount }
 
     LaunchedEffect(homeEvents) {
         homeEvents?.collect {
             focusManager.clearFocus()
-            pagerState.animateScrollToPage(0)
+            if (pagerState.currentPage != 0) pagerState.animateScrollToPage(0)
         }
     }
 
-    LaunchedEffect(livePageCount) {
-        while (pagerState.isScrollInProgress) { delay(16L) }
-        stablePageCount = livePageCount
-    }
-
-    LaunchedEffect(pagerState.currentPage) {
-        if (pagerState.currentPage == 0 && state.query.isNotBlank()) {
-            onSearchChange("")
+    // Clear an active search only once the pager has fully SETTLED on Home.
+    // Using currentPage here would fire mid-fling (it flips at the halfway
+    // threshold while isScrollInProgress is still true), mutating state —
+    // and therefore pageCount — underneath the active gesture.
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerState.settledPage }.collect { settled ->
+            if (settled == 0 && state.query.isNotBlank()) {
+                onSearchChange("")
+            }
         }
     }
 
-    // ── Icon preloading ───────────────────────────────────────────────────────
-    LaunchedEffect(pagerState.currentPage, state.pagedApps) {
-        val currentPage  = pagerState.currentPage
-        val appPageIndex = if (currentPage == 0) 0 else currentPage - 1
-
-        val pagesToPreload = listOf(appPageIndex, appPageIndex + 1)
-            .filter { it in 0 until state.pagedApps.size }
-
-        val itemsToPreload = pagesToPreload.flatMap { index ->
-            state.pagedApps[index].map { it.componentKey to it.packageName }
-        }
-
-        if (itemsToPreload.isNotEmpty()) {
-            IconCache.preload(context, itemsToPreload)
+    // ── Settle-aware icon prefetch (±2 pages around the settled page) ────────
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerState.settledPage to state.pagedApps }.collect { (settled, paged) ->
+            val appPage = settled - 1   // page 0 is Home
+            val items = ((appPage - 1)..(appPage + 2))
+                .filter { it in paged.indices }
+                .flatMap { paged[it] }
+                .map { it.componentKey to it.packageName }
+            if (items.isNotEmpty()) IconCache.preload(context, items)
         }
     }
 
@@ -180,39 +173,23 @@ fun LauncherScreen(
             modifier = Modifier.fillMaxSize(),
             color    = MaterialTheme.colorScheme.background
         ) {
-            DisposableEffect(Unit) {
-                val receiver = object : BroadcastReceiver() {
-                    override fun onReceive(c: Context, i: Intent) {
-                        if (i.action == Intent.ACTION_PACKAGE_REMOVED &&
-                            i.getBooleanExtra(Intent.EXTRA_REPLACING, false)) return
-                        onRefresh()
-                    }
-                }
-                val filter = IntentFilter().apply {
-                    addAction(Intent.ACTION_PACKAGE_ADDED)
-                    addAction(Intent.ACTION_PACKAGE_REMOVED)
-                    addAction(Intent.ACTION_PACKAGE_REPLACED)
-                    addDataScheme("package")
-                }
-                context.registerReceiver(receiver, filter)
-                onDispose { context.unregisterReceiver(receiver) }
-            }
-
             Box(modifier = Modifier.fillMaxSize()) {
 
-                if (state.loading)
+                if (state.loading) {
                     CircularProgressIndicator(Modifier.align(Alignment.Center))
-                if (state.isRefreshing && !state.loading)
+                }
+                if (state.isRefreshing && !state.loading) {
                     LinearProgressIndicator(
                         Modifier
                             .align(Alignment.TopCenter)
                             .fillMaxWidth()
                     )
+                }
 
                 HorizontalPager(
                     state                   = pagerState,
                     modifier                = Modifier.fillMaxSize(),
-                    beyondViewportPageCount = 1
+                    beyondViewportPageCount = 2
                 ) { page ->
                     if (page == 0) {
                         HomePageContent(
@@ -229,108 +206,147 @@ fun LauncherScreen(
                             onLaunchApp       = onLaunchApp,
                             onMovePinned      = onMovePinned,
                             onCreateFolder    = onCreateFolder,
-                            onDeleteFolder    = onDeleteFolder,
-                            onMoveToFolder    = onMoveToFolder,
                             onToggleHideAppsInFolders = onToggleHideAppsInFolders
                         )
                     } else {
                         val pageIndex = page - 1
-                        val pageApps  = state.pagedApps.getOrNull(pageIndex) ?: emptyList()
+                        val pageApps  = state.pagedApps.getOrNull(pageIndex)
 
                         AppsGridPage(
-                            apps                = pageApps,
-                            recycleApps         = state.recycleApps,
-                            query               = state.query,
-                            categories          = state.categories,
-                            selectedCategory    = state.selectedCategory,
-                            folders             = state.folders,
-                            onSearchChange      = onSearchChange,
-                            onSelectCategory    = onSelectCategory,
-                            navBarPadding       = navBarPadding,
-                            onLaunchApp         = onLaunchApp,
-                            onTogglePinned      = onTogglePinned,
-                            onSetCustomCategory = onSetCustomCategory,
-                            onToggleHidden      = onToggleHidden,
-                            onOpenInStore       = onOpenInStore,
-                            onRemoveItem        = onRemoveItem,
-                            onMoveToFolder      = onMoveToFolder
+                            apps             = pageApps,
+                            recycleApps      = state.recycleApps,
+                            query            = state.query,
+                            categories       = state.categories,
+                            selectedCategory = state.selectedCategory,
+                            onSearchChange   = onSearchChange,
+                            onSelectCategory = onSelectCategory,
+                            navBarPadding    = navBarPadding,
+                            onLaunchApp      = onLaunchApp,
+                            onShowAppMenu    = { menuItem = it },
+                            onShowRecycleMenu = { recycleMenuItem = it },
+                            onOpenInStore    = onOpenInStore
                         )
                     }
                 }
 
-                Row(
-                    modifier = Modifier
+                SwipeHint(
+                    pagerState = pagerState,
+                    modifier   = Modifier
                         .align(Alignment.BottomCenter)
                         .navigationBarsPadding()
                         .padding(bottom = 12.dp)
-                        .graphicsLayer {
-                            val s = if (isScrubbing) 1.1f else 1f
-                            scaleX = s; scaleY = s
-                        }
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(
-                            MaterialTheme.colorScheme.secondaryContainer.copy(
-                                alpha = if (isScrubbing) 0.8f else 0f
-                            )
-                        )
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                        .onSizeChanged { indicatorWidth = it.width }
-                        .pointerInput(indicatorWidth, pagerState.pageCount) {
-                            var lastTarget = -1
-                            detectDragGesturesAfterLongPress(
-                                onDragStart = { offset ->
-                                    isScrubbing = true
-                                    lastTarget  = -1
-                                    if (indicatorWidth > 0) {
-                                        val fraction   = (offset.x / indicatorWidth).coerceIn(0f, 1f)
-                                        val targetPage = (fraction * (pagerState.pageCount - 1)).roundToInt()
-                                        lastTarget = targetPage
-                                        scope.launch { pagerState.scrollToPage(targetPage) }
-                                    }
-                                },
-                                onDrag = { change, _ ->
-                                    if (indicatorWidth > 0) {
-                                        val fraction   = (change.position.x / indicatorWidth).coerceIn(0f, 1f)
-                                        val targetPage = (fraction * (pagerState.pageCount - 1)).roundToInt()
-                                        if (targetPage != lastTarget) {
-                                            lastTarget = targetPage
-                                            scope.launch { pagerState.scrollToPage(targetPage) }
-                                        }
-                                    }
-                                },
-                                onDragEnd    = { isScrubbing = false; lastTarget = -1 },
-                                onDragCancel = { isScrubbing = false; lastTarget = -1 }
-                            )
-                        },
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment     = Alignment.CenterVertically
-                ) {
-                    repeat(pagerState.pageCount) { index ->
-                        val isSelected = pagerState.currentPage == index
-
-                        val dotSize by animateDpAsState(
-                            targetValue   = if (isSelected) 8.dp else 5.dp,
-                            animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
-                            label         = "dot_size_$index"
-                        )
-                        val dotAlpha by animateFloatAsState(
-                            targetValue   = if (isSelected) 0.65f else 0.25f,
-                            animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
-                            label         = "dot_alpha_$index"
-                        )
-
-                        Box(
-                            Modifier
-                                .size(dotSize)
-                                .clip(CircleShape)
-                                .background(
-                                    MaterialTheme.colorScheme.onBackground.copy(alpha = dotAlpha)
-                                )
-                        )
-                    }
-                }
+                )
             }
 
+            // ── Hoisted app-item menu (single shared bottom sheet) ──────────
+            menuItem?.let { item ->
+                ItemMenuSheet(
+                    item        = item,
+                    onDismiss   = { menuItem = null },
+                    onPin       = { onTogglePinned(item) },
+                    onHide      = { onToggleHidden(item) },
+                    onAppInfo   = { openAppInfo(context, item) },
+                    onSetCategory = { categoryDialogItem = item },
+                    onResetCategory = if (item.customCategory != null) {
+                        { onSetCustomCategory(item, null) }
+                    } else null,
+                    onMoveToFolder = { folderPickerItem = item }
+                )
+            }
+
+            // ── Hoisted recycle-bin menu ─────────────────────────────────────
+            recycleMenuItem?.let { item ->
+                RecycleMenuSheet(
+                    item        = item,
+                    onDismiss   = { recycleMenuItem = null },
+                    onOpenStore = { onOpenInStore(item) },
+                    onAppInfo   = { openAppInfo(context, item) },
+                    onDelete    = { onRemoveItem(item) }
+                )
+            }
+
+            // ── Hoisted category dialog (single shared text field) ──────────
+            categoryDialogItem?.let { item ->
+                var input by remember(item.componentKey) {
+                    mutableStateOf(item.customCategory ?: "")
+                }
+                AlertDialog(
+                    onDismissRequest = { categoryDialogItem = null },
+                    title            = { Text("Set Category") },
+                    text             = {
+                        OutlinedTextField(
+                            value         = input,
+                            onValueChange = { input = it },
+                            label         = { Text("Category name") },
+                            singleLine    = true,
+                            shape         = RoundedCornerShape(12.dp)
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            if (input.trim().isNotEmpty()) onSetCustomCategory(item, input.trim())
+                            categoryDialogItem = null
+                        }) { Text("Set") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { categoryDialogItem = null }) { Text("Cancel") }
+                    }
+                )
+            }
+
+            // ── Hoisted folder picker ────────────────────────────────────────
+            folderPickerItem?.let { item ->
+                AlertDialog(
+                    onDismissRequest = { folderPickerItem = null },
+                    title = { Text("Move to group") },
+                    text  = {
+                        if (state.folders.isEmpty()) {
+                            Text("No groups created yet. Create one in Settings.")
+                        } else {
+                            LazyColumn {
+                                if (item.folderId != null) {
+                                    item(key = "remove_from_group") {
+                                        MenuActionRow(
+                                            icon  = Icons.Rounded.FolderOff,
+                                            label = "Remove from group",
+                                            onClick = {
+                                                onMoveToFolder(item, null)
+                                                folderPickerItem = null
+                                            }
+                                        )
+                                    }
+                                }
+                                items(state.folders, key = { it.id }) { folder ->
+                                    MenuActionRow(
+                                        icon  = Icons.Rounded.Folder,
+                                        label = folder.name,
+                                        onClick = {
+                                            onMoveToFolder(item, folder.id)
+                                            folderPickerItem = null
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = { folderPickerItem = null }) { Text("Cancel") }
+                    }
+                )
+            }
+
+            // ── Restore result ───────────────────────────────────────────────
+            state.restoreMessage?.let { msg ->
+                AlertDialog(
+                    onDismissRequest = onRestoreMessageShown,
+                    confirmButton    = {
+                        TextButton(onClick = onRestoreMessageShown) { Text("OK") }
+                    },
+                    text = { Text(msg) }
+                )
+            }
+
+            // ── Hidden apps dialog ───────────────────────────────────────────
             if (hiddenAppsOpen) {
                 AlertDialog(
                     onDismissRequest = { hiddenAppsOpen = false },
@@ -356,10 +372,7 @@ fun LauncherScreen(
                                             verticalAlignment     = Alignment.CenterVertically
                                         ) {
                                             AppIcon(item = item, disabled = false)
-                                            Text(
-                                                item.label,
-                                                style = MaterialTheme.typography.bodyMedium
-                                            )
+                                            Text(item.label, style = MaterialTheme.typography.bodyMedium)
                                         }
                                         IconButton(onClick = { onToggleHidden(item) }) {
                                             Icon(
@@ -375,6 +388,7 @@ fun LauncherScreen(
                 )
             }
 
+            // ── Diagnostics dialog ───────────────────────────────────────────
             if (diagnosticsOpen) {
                 AlertDialog(
                     onDismissRequest = { diagnosticsOpen = false },
@@ -388,16 +402,105 @@ fun LauncherScreen(
                             Text("No events recorded yet.")
                         } else {
                             SelectionContainer {
-                                Text(
-                                    text  = log,
-                                    style = MaterialTheme.typography.bodySmall
-                                )
+                                Text(text = log, style = MaterialTheme.typography.bodySmall)
                             }
                         }
                     }
                 )
             }
         }
+    }
+}
+
+// ── Shared menu sheets ────────────────────────────────────────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ItemMenuSheet(
+    item: LauncherItemEntity,
+    onDismiss: () -> Unit,
+    onPin: () -> Unit,
+    onHide: () -> Unit,
+    onAppInfo: () -> Unit,
+    onSetCategory: () -> Unit,
+    onResetCategory: (() -> Unit)?,
+    onMoveToFolder: () -> Unit
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ) {
+        MenuSheetHeader(item.label)
+        MenuActionRow(Icons.Rounded.FolderZip, "Move to group") { onDismiss(); onMoveToFolder() }
+        MenuActionRow(
+            Icons.Rounded.PushPin,
+            if (item.isPinned) "Unpin from home" else "Pin to home"
+        ) { onDismiss(); onPin() }
+        MenuActionRow(Icons.Rounded.VisibilityOff, "Hide app") { onDismiss(); onHide() }
+        MenuActionRow(Icons.Rounded.Info, "App info") { onDismiss(); onAppInfo() }
+        MenuActionRow(Icons.AutoMirrored.Rounded.Label, "Set category") { onDismiss(); onSetCategory() }
+        if (onResetCategory != null) {
+            MenuActionRow(Icons.AutoMirrored.Rounded.LabelOff, "Reset category") { onDismiss(); onResetCategory() }
+        }
+        Spacer(Modifier.navigationBarsPadding().height(16.dp))
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RecycleMenuSheet(
+    item: LauncherItemEntity,
+    onDismiss: () -> Unit,
+    onOpenStore: () -> Unit,
+    onAppInfo: () -> Unit,
+    onDelete: () -> Unit
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ) {
+        MenuSheetHeader(item.label)
+        MenuActionRow(Icons.Rounded.ShoppingCart, "Open in Play Store") { onDismiss(); onOpenStore() }
+        MenuActionRow(Icons.Rounded.Info, "App info") { onDismiss(); onAppInfo() }
+        HorizontalDivider()
+        MenuActionRow(
+            icon = Icons.Rounded.DeleteForever,
+            label = "Delete from Recycle Bin",
+            tint = MaterialTheme.colorScheme.error
+        ) { onDismiss(); onDelete() }
+        Spacer(Modifier.navigationBarsPadding().height(16.dp))
+    }
+}
+
+@Composable
+private fun MenuSheetHeader(title: String) {
+    Text(
+        title,
+        style      = MaterialTheme.typography.titleMedium,
+        fontWeight = FontWeight.SemiBold,
+        maxLines   = 1,
+        modifier   = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)
+    )
+}
+
+/** Single reusable action row for sheets & pickers. */
+@Composable
+private fun MenuActionRow(
+    icon: ImageVector,
+    label: String,
+    tint: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurface,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 14.dp),
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(icon, contentDescription = null, tint = tint)
+        Text(label, style = MaterialTheme.typography.bodyLarge, color = tint)
     }
 }
 
@@ -414,14 +517,12 @@ private fun HomePageContent(
     onLaunchApp:       (LauncherItemEntity) -> Unit,
     onMovePinned:      (Int, Int) -> Unit,
     onCreateFolder:    (String) -> Unit,
-    onDeleteFolder:    (String) -> Unit,
-    onMoveToFolder:    (LauncherItemEntity, String?) -> Unit,
     onToggleHideAppsInFolders: (Boolean) -> Unit
 ) {
     val context = LocalContext.current
-    var settingsMenuExpanded by remember { mutableStateOf(false) }
+    var settingsMenuExpanded  by remember { mutableStateOf(false) }
     var showCreateFolderDialog by remember { mutableStateOf(false) }
-    var showAdvancedSettings by remember { mutableStateOf(false) }
+    var showAdvancedSettings  by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -448,18 +549,18 @@ private fun HomePageContent(
                     )
                 }
                 DropdownMenu(
-                    expanded        = settingsMenuExpanded,
+                    expanded         = settingsMenuExpanded,
                     onDismissRequest = { settingsMenuExpanded = false }
                 ) {
                     DropdownMenuItem(
-                        text         = { Text("Create Group") },
-                        leadingIcon  = { Icon(Icons.Rounded.CreateNewFolder, null) },
-                        onClick      = { settingsMenuExpanded = false; showCreateFolderDialog = true }
+                        text        = { Text("Create Group") },
+                        leadingIcon = { Icon(Icons.Rounded.CreateNewFolder, null) },
+                        onClick     = { settingsMenuExpanded = false; showCreateFolderDialog = true }
                     )
                     DropdownMenuItem(
-                        text         = { Text("Backup data") },
-                        leadingIcon  = { Icon(Icons.Rounded.SaveAlt, null) },
-                        onClick      = { settingsMenuExpanded = false; onBackup() }
+                        text        = { Text("Backup data") },
+                        leadingIcon = { Icon(Icons.Rounded.SaveAlt, null) },
+                        onClick     = { settingsMenuExpanded = false; onBackup() }
                     )
                     DropdownMenuItem(
                         text        = { Text("Restore data") },
@@ -529,21 +630,21 @@ private fun HomePageContent(
         if (state.pinned.isNotEmpty()) {
             PinnedAppsList(
                 items    = state.pinned,
+                onLaunch = onLaunchApp,
+                onMove   = onMovePinned,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f, fill = false),
-                onLaunch = onLaunchApp,
-                onMove   = onMovePinned
+                    .weight(1f, fill = false)
             )
-        } else if (!state.loading && state.folders.isEmpty()) {
+        } else if (!state.loading) {
             Box(
-                modifier        = Modifier
+                modifier         = Modifier
                     .fillMaxWidth()
                     .weight(1f, fill = false),
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("No pinned apps",      style = MaterialTheme.typography.bodyLarge)
+                    Text("No pinned apps", style = MaterialTheme.typography.bodyLarge)
                     Text("Swipe right to see all apps", style = MaterialTheme.typography.bodySmall)
                 }
             }
@@ -583,26 +684,24 @@ private fun HomePageContent(
         AlertDialog(
             onDismissRequest = { showAdvancedSettings = false },
             title = { Text("Advanced Settings") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Hide apps in groups from 'All'", style = MaterialTheme.typography.bodyLarge)
-                            Text(
-                                "When enabled, apps that belong to a group will not be shown in the 'All' category.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Switch(
-                            checked = state.hideAppsInFolders,
-                            onCheckedChange = { onToggleHideAppsInFolders(it) }
+            text  = {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Hide apps in groups from 'All'", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "When enabled, apps that belong to a group will not be shown in the 'All' category.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
+                    Switch(
+                        checked = state.hideAppsInFolders,
+                        onCheckedChange = { onToggleHideAppsInFolders(it) }
+                    )
                 }
             },
             confirmButton = {
@@ -610,117 +709,6 @@ private fun HomePageContent(
             }
         )
     }
-
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun FolderCell(
-    folder: FolderEntity,
-    onLaunch: (LauncherItemEntity) -> Unit,
-    onDelete: () -> Unit,
-    onMoveOutOfFolder: (LauncherItemEntity, String?) -> Unit
-) {
-    var expanded by remember { mutableStateOf(false) }
-    var contextMenuOpen by remember { mutableStateOf(false) }
-
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .combinedClickable(
-                onClick = { expanded = true },
-                onLongClick = { contextMenuOpen = true }
-            ),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f)
-        ),
-        shape = RoundedCornerShape(18.dp)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Icon(
-                Icons.Rounded.Folder, null,
-                modifier = Modifier.size(40.dp),
-                tint = MaterialTheme.colorScheme.primary
-            )
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    folder.name,
-                    fontWeight = FontWeight.SemiBold,
-                    style = MaterialTheme.typography.bodyLarge
-                )
-                Text(
-                    "${folder.items.size} apps",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Icon(
-                Icons.AutoMirrored.Rounded.ArrowForwardIos, null,
-                modifier = Modifier.size(16.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-            )
-        }
-        
-        DropdownMenu(expanded = contextMenuOpen, onDismissRequest = { contextMenuOpen = false }) {
-            DropdownMenuItem(
-                text = { Text("Delete Group", color = MaterialTheme.colorScheme.error) },
-                leadingIcon = { Icon(Icons.Rounded.Delete, null, tint = MaterialTheme.colorScheme.error) },
-                onClick = { contextMenuOpen = false; onDelete() }
-            )
-        }
-    }
-
-    if (expanded) {
-        AlertDialog(
-            onDismissRequest = { expanded = false },
-            confirmButton    = { TextButton({ expanded = false }) { Text("Close") } },
-            title = { Text(folder.name) },
-            text = {
-                if (folder.items.isEmpty()) {
-                    Text("No apps in this group.")
-                } else {
-                    LazyColumn(modifier = Modifier.fillMaxWidth()) {
-                        items(items = folder.items, key = { it.componentKey }) { item ->
-                            var itemMenuOpen by remember { mutableStateOf(false) }
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .combinedClickable(
-                                        onClick = { onLaunch(item); expanded = false },
-                                        onLongClick = { itemMenuOpen = true }
-                                    )
-                                    .padding(vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                AppIcon(item = item, disabled = false)
-                                Spacer(Modifier.width(12.dp))
-                                Text(
-                                    item.label,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                
-                                DropdownMenu(expanded = itemMenuOpen, onDismissRequest = { itemMenuOpen = false }) {
-                                    DropdownMenuItem(
-                                        text = { Text("Move out of group") },
-                                        leadingIcon = { Icon(Icons.Rounded.DriveFileMove, null) },
-                                        onClick = { itemMenuOpen = false; onMoveOutOfFolder(item, null) }
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        )
-    }
-
 }
 
 // ── Header ────────────────────────────────────────────────────────────────────
@@ -739,7 +727,7 @@ private fun HeaderSection(modifier: Modifier = Modifier) {
                 set(java.util.Calendar.MILLISECOND, 0)
                 add(java.util.Calendar.DAY_OF_MONTH, 1)
             }.timeInMillis
-            delay(nextDay - now)
+            kotlinx.coroutines.delay(nextDay - now)
             currentTime = System.currentTimeMillis()
         }
     }
@@ -782,17 +770,9 @@ private fun HeaderSection(modifier: Modifier = Modifier) {
                 fontWeight = FontWeight.Bold,
                 color      = MaterialTheme.colorScheme.primary
             )
-            Text(
-                dateStr,
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.primary
-            )
+            Text(dateStr, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
             if (hijriStr.isNotEmpty()) {
-                Text(
-                    hijriStr,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary
-                )
+                Text(hijriStr, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
             }
         }
         Text(
@@ -805,25 +785,20 @@ private fun HeaderSection(modifier: Modifier = Modifier) {
 }
 
 // ── Apps grid page ────────────────────────────────────────────────────────────
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AppsGridPage(
-    apps:                List<LauncherItemEntity>,
-    recycleApps:         List<LauncherItemEntity>,
-    query:               String,
-    categories:          List<String>,
-    selectedCategory:    String,
-    folders:             List<FolderEntity>,
-    onSearchChange:      (String) -> Unit,
-    onSelectCategory:    (String) -> Unit,
-    navBarPadding:       Dp,
-    onLaunchApp:         (LauncherItemEntity) -> Unit,
-    onTogglePinned:      (LauncherItemEntity) -> Unit,
-    onSetCustomCategory: (LauncherItemEntity, String?) -> Unit,
-    onToggleHidden:      (LauncherItemEntity) -> Unit,
-    onOpenInStore:       (LauncherItemEntity) -> Unit,
-    onRemoveItem:        (LauncherItemEntity) -> Unit,
-    onMoveToFolder:      (LauncherItemEntity, String?) -> Unit
+    apps:             ImmutableList<LauncherItemEntity>?,
+    recycleApps:      ImmutableList<LauncherItemEntity>,
+    query:            String,
+    categories:       ImmutableList<String>,
+    selectedCategory: String,
+    onSearchChange:   (String) -> Unit,
+    onSelectCategory: (String) -> Unit,
+    navBarPadding:    Dp,
+    onLaunchApp:      (LauncherItemEntity) -> Unit,
+    onShowAppMenu:    (LauncherItemEntity) -> Unit,
+    onShowRecycleMenu: (LauncherItemEntity) -> Unit,
+    onOpenInStore:    (LauncherItemEntity) -> Unit
 ) {
     val context        = LocalContext.current
     val gridState      = rememberLazyGridState()
@@ -864,14 +839,13 @@ private fun AppsGridPage(
                 recycleApps = recycleApps,
                 onDismiss   = { recycleBinOpen = false },
                 onOpenStore = onOpenInStore,
-                onDelete    = onRemoveItem,
-                onAppInfo   = { openAppInfo(context, it) }
+                onShowMenu  = onShowRecycleMenu
             )
         }
 
-        if (apps.isEmpty() && query.isNotBlank()) {
+        if ((apps == null || apps.isEmpty()) && query.isNotBlank()) {
             Box(
-                modifier        = Modifier
+                modifier         = Modifier
                     .fillMaxWidth()
                     .weight(1f),
                 contentAlignment = Alignment.Center
@@ -881,14 +855,14 @@ private fun AppsGridPage(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-        } else {
+        } else if (apps != null) {
             LazyVerticalGrid(
-                columns               = GridCells.Fixed(4),
-                state                 = gridState,
-                modifier              = Modifier
+                columns           = GridCells.Fixed(4),
+                state             = gridState,
+                modifier          = Modifier
                     .fillMaxWidth()
                     .weight(1f),
-                contentPadding        = PaddingValues(
+                contentPadding    = PaddingValues(
                     start  = 8.dp,
                     end    = 8.dp,
                     top    = 4.dp,
@@ -903,14 +877,9 @@ private fun AppsGridPage(
                     contentType = { "app_cell" }
                 ) { item ->
                     AppCell(
-                        item                = item,
-                        folders             = folders,
-                        onLaunch            = onLaunchApp,
-                        onTogglePinned      = onTogglePinned,
-                        onSetCustomCategory = onSetCustomCategory,
-                        onAppInfo           = { openAppInfo(context, it) },
-                        onToggleHidden      = onToggleHidden,
-                        onMoveToFolder      = onMoveToFolder
+                        item       = item,
+                        onLaunch   = onLaunchApp,
+                        onShowMenu = onShowAppMenu
                     )
                 }
 
@@ -926,7 +895,16 @@ private fun AppsGridPage(
 }
 
 // ── Global search bar ─────────────────────────────────────────────────────────
-@OptIn(ExperimentalMaterial3Api::class)
+//
+// The TextField uses a LOCAL state buffer to avoid the classic Compose
+// controlled-text-field race condition: state.query travels through
+// combine → flowOn(Dispatchers.Default) → stateIn before arriving back
+// as the TextField value. That round-trip delay causes typed characters
+// to flash-disappear and makes deletion unreliable.
+//
+// Local state updates in the SAME frame as the keystroke; the ViewModel
+// is notified in parallel. External changes (e.g. clearing on Home press)
+// sync back via the LaunchedEffect.
 @Composable
 private fun GlobalSearchBar(
     query:             String,
@@ -935,6 +913,14 @@ private fun GlobalSearchBar(
     onSearchChange:    (String) -> Unit,
     onRecycleBinClick: () -> Unit
 ) {
+    // Local buffer: immediate, same-frame update.
+    var localQuery by remember { mutableStateOf(query) }
+
+    // Sync external → local (Home press clears, restore, etc.).
+    LaunchedEffect(query) {
+        if (query != localQuery) localQuery = query
+    }
+
     Row(
         modifier              = Modifier
             .fillMaxWidth()
@@ -943,14 +929,23 @@ private fun GlobalSearchBar(
         verticalAlignment     = Alignment.CenterVertically
     ) {
         OutlinedTextField(
-            value         = query,
-            onValueChange = onSearchChange,
+            value         = localQuery,
+            onValueChange = { newValue ->
+                localQuery = newValue       // Immediate local update (same frame)
+                onSearchChange(newValue)    // Notify ViewModel (async)
+            },
             modifier      = Modifier.weight(1f),
             singleLine    = true,
+            textStyle     = LocalTextStyle.current.copy(
+                textDirection = TextDirection.Content
+            ),
             leadingIcon   = { Icon(Icons.Rounded.Search, null) },
             trailingIcon  = {
-                if (query.isNotEmpty()) {
-                    IconButton(onClick = { onSearchChange("") }) {
+                if (localQuery.isNotEmpty()) {
+                    IconButton(onClick = {
+                        localQuery = ""          // Immediate clear
+                        onSearchChange("")       // Notify ViewModel
+                    }) {
                         Icon(Icons.Rounded.Clear, "Clear")
                     }
                 }
@@ -982,7 +977,7 @@ private fun GlobalSearchBar(
 @Composable
 private fun NotesSection(restoreKey: Boolean = false) {
     val context = LocalContext.current
-    val prefs = remember { context.getSharedPreferences("launcher_notes", Context.MODE_PRIVATE) }
+    val prefs   = remember { context.getSharedPreferences("launcher_notes", Context.MODE_PRIVATE) }
 
     fun loadNotes(): List<String> {
         val str = prefs.getString("notes_data", "") ?: ""
@@ -1005,11 +1000,11 @@ private fun NotesSection(restoreKey: Boolean = false) {
         prefs.edit().putString("notes_data", arr.toString()).apply()
     }
 
-    var isAdding      by remember { mutableStateOf(false) }
-    var inputText     by remember { mutableStateOf("") }
-    var noteToDelete  by remember { mutableStateOf<String?>(null) }
-    var editingIndex  by remember { mutableIntStateOf(-1) }
-    var editingText   by remember { mutableStateOf("") }
+    var isAdding     by remember { mutableStateOf(false) }
+    var inputText    by remember { mutableStateOf("") }
+    var noteToDelete by remember { mutableStateOf<String?>(null) }
+    var editingIndex by remember { mutableIntStateOf(-1) }
+    var editingText  by remember { mutableStateOf("") }
 
     Column(modifier = Modifier
         .fillMaxWidth()
@@ -1139,18 +1134,16 @@ private fun NotesSection(restoreKey: Boolean = false) {
             }
         )
     }
-
 }
 
 // ── Recycle bin bottom sheet ───────────────────────────────────────────────────
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun RecycleBinSheet(
-    recycleApps: List<LauncherItemEntity>,
+    recycleApps: ImmutableList<LauncherItemEntity>,
     onDismiss:   () -> Unit,
     onOpenStore: (LauncherItemEntity) -> Unit,
-    onDelete:    (LauncherItemEntity) -> Unit,
-    onAppInfo:   (LauncherItemEntity) -> Unit
+    onShowMenu:  (LauncherItemEntity) -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
@@ -1178,7 +1171,7 @@ private fun RecycleBinSheet(
 
         if (recycleApps.isEmpty()) {
             Box(
-                modifier        = Modifier
+                modifier         = Modifier
                     .fillMaxWidth()
                     .padding(vertical = 40.dp),
                 contentAlignment = Alignment.Center
@@ -1191,9 +1184,9 @@ private fun RecycleBinSheet(
             }
         } else {
             LazyVerticalGrid(
-                columns               = GridCells.Fixed(4),
-                modifier              = Modifier.fillMaxWidth(),
-                contentPadding        = PaddingValues(
+                columns           = GridCells.Fixed(4),
+                modifier          = Modifier.fillMaxWidth(),
+                contentPadding    = PaddingValues(
                     start  = 8.dp,
                     end    = 8.dp,
                     top    = 4.dp,
@@ -1210,427 +1203,13 @@ private fun RecycleBinSheet(
                     RecycleCell(
                         item        = item,
                         onOpenStore = onOpenStore,
-                        onDelete    = onDelete,
-                        onAppInfo   = onAppInfo
+                        onShowMenu  = onShowMenu
                     )
                 }
 
                 val rem = recycleApps.size % 4
                 if (rem != 0) {
                     items(count = 4 - rem) { Box(Modifier.aspectRatio(0.75f)) }
-                }
-            }
-        }
-    }
-}
-
-// ── Recycle cell ──────────────────────────────────────────────────────────────
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun RecycleCell(
-    item:        LauncherItemEntity,
-    onOpenStore: (LauncherItemEntity) -> Unit,
-    onDelete:    (LauncherItemEntity) -> Unit,
-    onAppInfo:   (LauncherItemEntity) -> Unit
-) {
-    var expanded by remember { mutableStateOf(false) }
-
-    Box(
-        modifier = Modifier
-            .aspectRatio(0.75f)
-            .clip(RoundedCornerShape(16.dp))
-    ) {
-        Column(
-            modifier            = Modifier
-                .fillMaxSize()
-                .combinedClickable(
-                    onClick     = { onOpenStore(item) },
-                    onLongClick = { expanded = true }
-                )
-                .padding(vertical = 8.dp, horizontal = 4.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                AppIcon(item = item, disabled = true)
-                Box(
-                    Modifier
-                        .size(48.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.error.copy(alpha = 0.08f))
-                        .border(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.4f), CircleShape)
-                )
-            }
-            Spacer(Modifier.height(6.dp))
-            Text(
-                item.label,
-                maxLines  = 2,
-                overflow  = TextOverflow.Ellipsis,
-                style     = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Medium,
-                textAlign = TextAlign.Center,
-                color     = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
-                modifier  = Modifier.fillMaxWidth()
-            )
-        }
-
-        Box(Modifier.align(Alignment.TopEnd)) {
-            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                DropdownMenuItem(
-                    text        = { Text("Open in Play Store") },
-                    leadingIcon = { Icon(Icons.Rounded.ShoppingCart, null) },
-                    onClick     = { expanded = false; onOpenStore(item) }
-                )
-                DropdownMenuItem(
-                    text        = { Text("App info") },
-                    leadingIcon = { Icon(Icons.Rounded.Info, null) },
-                    onClick     = { expanded = false; onAppInfo(item) }
-                )
-                HorizontalDivider()
-                DropdownMenuItem(
-                    text        = {
-                        Text(
-                            "Delete from Recycle Bin",
-                            color = MaterialTheme.colorScheme.error
-                        )
-                    },
-                    leadingIcon = {
-                        Icon(
-                            Icons.Rounded.DeleteForever, null,
-                            tint = MaterialTheme.colorScheme.error
-                        )
-                    },
-                    onClick = { expanded = false; onDelete(item) }
-                )
-            }
-        }
-    }
-}
-
-// ── App icon ──────────────────────────────────────────────────────────────────
-@Composable
-private fun AppIcon(item: LauncherItemEntity, disabled: Boolean) {
-    val context = LocalContext.current
-    val key     = item.componentKey
-
-    val imageBitmap by produceState<ImageBitmap?>(
-        initialValue = IconCache.getCachedImageBitmap(key),
-        key1         = key
-    ) {
-        if (value == null && item.isInstalled) {
-            value = withContext(Dispatchers.IO) {
-                IconCache.loadIcon(context, key, item.packageName)
-            }
-        }
-    }
-
-    val alpha by animateFloatAsState(
-        targetValue   = if (imageBitmap != null) 1f else 0f,
-        animationSpec = spring(stiffness = Spring.StiffnessLow),
-        label         = "icon_fade"
-    )
-
-    Box(
-        modifier        = Modifier
-            .size(52.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .alpha(if (disabled) 0.5f else 1f),
-        contentAlignment = Alignment.Center
-    ) {
-        Box(
-            modifier        = Modifier
-                .size(48.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                item.label.take(1).uppercase(),
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        if (imageBitmap != null) {
-            Image(
-                bitmap             = imageBitmap!!,
-                contentDescription = item.label,
-                modifier           = Modifier
-                    .size(48.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .alpha(alpha),
-                contentScale       = ContentScale.Fit
-            )
-        }
-    }
-}
-
-// ── App cell ──────────────────────────────────────────────────────────────────
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun AppCell(
-    item:                LauncherItemEntity,
-    folders:             List<FolderEntity>,
-    onLaunch:            (LauncherItemEntity) -> Unit,
-    onTogglePinned:      (LauncherItemEntity) -> Unit,
-    onSetCustomCategory: (LauncherItemEntity, String?) -> Unit,
-    onAppInfo:           (LauncherItemEntity) -> Unit,
-    onToggleHidden:      (LauncherItemEntity) -> Unit,
-    onMoveToFolder:      (LauncherItemEntity, String?) -> Unit
-) {
-    var expanded           by remember { mutableStateOf(false) }
-    var showCategoryDialog by remember { mutableStateOf(false) }
-    var categoryInput      by remember { mutableStateOf("") }
-    var showFolderSelector by remember { mutableStateOf(false) }
-
-    Box(
-        modifier = Modifier
-            .aspectRatio(0.75f)
-            .clip(RoundedCornerShape(16.dp))
-    ) {
-        Column(
-            modifier            = Modifier
-                .fillMaxSize()
-                .combinedClickable(
-                    onClick     = { onLaunch(item) },
-                    onLongClick = { expanded = true }
-                )
-                .padding(vertical = 8.dp, horizontal = 4.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            Box(contentAlignment = Alignment.TopEnd) {
-                AppIcon(item = item, disabled = false)
-                if (item.isPinned) {
-                    Icon(
-                        Icons.Rounded.PushPin, null,
-                        modifier = Modifier
-                            .size(12.dp)
-                            .offset(x = 2.dp, y = (-2).dp),
-                        tint     = MaterialTheme.colorScheme.primary
-                    )
-                }
-            }
-            Spacer(Modifier.height(6.dp))
-            Text(
-                item.label,
-                maxLines   = 2,
-                overflow   = TextOverflow.Ellipsis,
-                style      = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Medium,
-                textAlign  = TextAlign.Center,
-                modifier   = Modifier.fillMaxWidth()
-            )
-        }
-
-        Box(Modifier.align(Alignment.TopEnd)) {
-            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                DropdownMenuItem(
-                    text = { Text("Move to group") },
-                    leadingIcon = { Icon(Icons.Rounded.FolderZip, null) },
-                    onClick = { expanded = false; showFolderSelector = true }
-                )
-                DropdownMenuItem(
-                    text        = { Text(if (item.isPinned) "Unpin from home" else "Pin to home") },
-                    leadingIcon = { Icon(Icons.Rounded.PushPin, null) },
-                    onClick     = { expanded = false; onTogglePinned(item) }
-                )
-                DropdownMenuItem(
-                    text        = { Text("Hide app") },
-                    leadingIcon = { Icon(Icons.Rounded.VisibilityOff, null) },
-                    onClick     = { expanded = false; onToggleHidden(item) }
-                )
-                DropdownMenuItem(
-                    text        = { Text("App info") },
-                    leadingIcon = { Icon(Icons.Rounded.Info, null) },
-                    onClick     = { expanded = false; onAppInfo(item) }
-                )
-                DropdownMenuItem(
-                    text        = { Text("Set category") },
-                    leadingIcon = { Icon(Icons.AutoMirrored.Rounded.Label, null) },
-                    onClick     = {
-                        expanded           = false
-                        categoryInput      = item.customCategory ?: ""
-                        showCategoryDialog = true
-                    }
-                )
-                if (item.customCategory != null) {
-                    DropdownMenuItem(
-                        text        = { Text("Reset category") },
-                        leadingIcon = { Icon(Icons.AutoMirrored.Rounded.LabelOff, null) },
-                        onClick     = { expanded = false; onSetCustomCategory(item, null) }
-                    )
-                }
-            }
-        }
-    }
-
-    if (showCategoryDialog) {
-        AlertDialog(
-            onDismissRequest = { showCategoryDialog = false },
-            title            = { Text("Set Category") },
-            text             = {
-                OutlinedTextField(
-                    value         = categoryInput,
-                    onValueChange = { categoryInput = it },
-                    label         = { Text("Category name") },
-                    singleLine    = true,
-                    shape         = RoundedCornerShape(12.dp)
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    if (categoryInput.trim().isNotEmpty()) {
-                        onSetCustomCategory(item, categoryInput.trim())
-                    }
-                    showCategoryDialog = false
-                }) { Text("Set") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showCategoryDialog = false }) { Text("Cancel") }
-            }
-        )
-    }
-
-    if (showFolderSelector) {
-        AlertDialog(
-            onDismissRequest = { showFolderSelector = false },
-            title = { Text("Move to group") },
-            text = {
-                if (folders.isEmpty()) {
-                    Text("No groups created yet. Create one in Settings.")
-                } else {
-                    LazyColumn {
-                        if (item.folderId != null) {
-                            item {
-                                DropdownMenuItem(
-                                    text = { Text("Remove from group") },
-                                    leadingIcon = { Icon(Icons.Rounded.FolderOff, null) },
-                                    onClick = { onMoveToFolder(item, null); showFolderSelector = false }
-                                )
-                            }
-                        }
-                        items(folders) { folder ->
-                            DropdownMenuItem(
-                                text = { Text(folder.name) },
-                                leadingIcon = { Icon(Icons.Rounded.Folder, null) },
-                                onClick = { onMoveToFolder(item, folder.id); showFolderSelector = false }
-                            )
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton({ showFolderSelector = false }) { Text("Cancel") }
-            }
-        )
-    }
-
-}
-
-// ── Pinned apps list ──────────────────────────────────────────────────────────
-@Composable
-private fun PinnedAppsList(
-    items:    List<LauncherItemEntity>,
-    modifier: Modifier,
-    onLaunch: (LauncherItemEntity) -> Unit,
-    onMove:   (Int, Int) -> Unit
-) {
-    val density = LocalDensity.current
-    var measuredSlotHeightPx by remember { mutableFloatStateOf(with(density) { 84.dp.toPx() }) }
-    val listSpacingPx        = with(density) { 8.dp.toPx() }
-
-    var draggingKey  by remember { mutableStateOf<String?>(null) }
-    var dragOffsetY  by remember { mutableFloatStateOf(0f) }
-
-    val draggingIndex = remember(draggingKey, items) {
-        draggingKey?.let { key -> items.indexOfFirst { it.componentKey == key } } ?: -1
-    }
-    val targetIndex = remember(draggingIndex, dragOffsetY, items) {
-        if (draggingIndex < 0) -1
-        else (draggingIndex + (dragOffsetY / measuredSlotHeightPx).roundToInt())
-            .coerceIn(0, items.lastIndex)
-    }
-
-    LazyColumn(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        itemsIndexed(
-            items       = items,
-            key         = { _, item -> item.componentKey },
-            contentType = { _, _ -> "pinned_row" }
-        ) { index, item ->
-            val isDragging = item.componentKey == draggingKey
-
-            val neighbourShift = when {
-                draggingIndex < 0 -> 0f
-                isDragging        -> 0f
-                index in (minOf(draggingIndex, targetIndex)..maxOf(draggingIndex, targetIndex)) ->
-                    if (targetIndex > draggingIndex) -measuredSlotHeightPx else measuredSlotHeightPx
-                else -> 0f
-            }
-
-            val animatedNeighbourShift by animateFloatAsState(
-                targetValue   = neighbourShift,
-                animationSpec = spring(stiffness = Spring.StiffnessMedium),
-                label         = "neighbour_shift_$index"
-            )
-
-            val latestIndex by rememberUpdatedState(index)
-
-            Card(
-                onClick  = { if (!isDragging) onLaunch(item) },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .zIndex(if (isDragging) 1f else 0f)
-                    .graphicsLayer {
-                        translationY = if (isDragging) dragOffsetY else animatedNeighbourShift
-                    }
-                    .onSizeChanged { size ->
-                        val h = size.height.toFloat() + listSpacingPx
-                        if (h > 0f) measuredSlotHeightPx = h
-                    },
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer.copy(
-                        alpha = if (isDragging) 0.65f else 0.35f
-                    )
-                ),
-                shape = RoundedCornerShape(18.dp)
-            ) {
-                Row(
-                    modifier              = Modifier
-                        .fillMaxWidth()
-                        .padding(12.dp, 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalAlignment     = Alignment.CenterVertically
-                ) {
-                    AppIcon(item = item, disabled = false)
-                    Text(
-                        item.label,
-                        modifier   = Modifier.weight(1f),
-                        maxLines   = 1,
-                        overflow   = TextOverflow.Ellipsis,
-                        fontWeight = FontWeight.SemiBold,
-                        style      = MaterialTheme.typography.bodyLarge
-                    )
-                    Icon(
-                        Icons.Rounded.DragHandle, "Drag",
-                        tint     = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                        modifier = Modifier.pointerInput(item.componentKey) {
-                            detectDragGestures(
-                                onDragStart  = { draggingKey = item.componentKey; dragOffsetY = 0f },
-                                onDrag       = { change, amount ->
-                                    change.consume()
-                                    dragOffsetY += amount.y
-                                },
-                                onDragEnd    = {
-                                    val to = (latestIndex + (dragOffsetY / measuredSlotHeightPx)
-                                        .roundToInt()).coerceIn(0, items.lastIndex)
-                                    if (latestIndex != to) onMove(latestIndex, to)
-                                    draggingKey = null
-                                    dragOffsetY = 0f
-                                },
-                                onDragCancel = { draggingKey = null; dragOffsetY = 0f }
-                            )
-                        }
-                    )
                 }
             }
         }
