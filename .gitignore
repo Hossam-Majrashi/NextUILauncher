@@ -55,6 +55,8 @@ obj/
 # Keystore & Signing (مفاتيح التوقيع الحساسة)
 *.keystore
 *.jks
+key.properties
+**/key.properties
 keystore.properties
 signing.properties
 secrets.properties
