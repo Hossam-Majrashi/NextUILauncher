@@ -3,6 +3,7 @@ package com.nextui.launcher.ui
 import java.text.Collator
 
 import android.app.Application
+import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.runtime.Immutable
@@ -337,20 +338,29 @@ class LauncherViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             val t0 = System.nanoTime()
             runCatching {
-                val pm = appContext.packageManager
-                val intent = pm.getLaunchIntentForPackage(item.packageName)
-                val resolved = intent ?: run {
-                    val fallback = Intent(Intent.ACTION_MAIN).apply {
+                val intent = if (item.className.isNotBlank()) {
+                    Intent(Intent.ACTION_MAIN).apply {
                         addCategory(Intent.CATEGORY_LAUNCHER)
-                        setPackage(item.packageName)
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        component = ComponentName(item.packageName, item.className)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
                     }
-                    if (pm.resolveActivity(fallback, 0) != null) fallback else null
+                } else {
+                    val pm = appContext.packageManager
+                    (pm.getLaunchIntentForPackage(item.packageName) ?: run {
+                        val fallback = Intent(Intent.ACTION_MAIN).apply {
+                            addCategory(Intent.CATEGORY_LAUNCHER)
+                            setPackage(item.packageName)
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        if (pm.resolveActivity(fallback, 0) != null) fallback else null
+                    })?.apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+                    }
                 }
-                withContext(Dispatchers.Main) {
-                    resolved?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    if (resolved != null) {
-                        appContext.startActivity(resolved)
+
+                if (intent != null) {
+                    withContext(Dispatchers.Main) {
+                        appContext.startActivity(intent)
                         DiagnosticsLogger.recordPhase(
                             LagPhase.LAUNCH,
                             "${(System.nanoTime() - t0) / 1_000_000}ms",

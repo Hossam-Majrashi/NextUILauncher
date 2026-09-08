@@ -7,6 +7,8 @@ import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -123,8 +125,9 @@ fun LauncherScreen(
     var diagnosticsOpen    by remember { mutableStateOf(false) }
     var hiddenAppsOpen     by remember { mutableStateOf(false) }
 
-    val prefs     = remember { context.getSharedPreferences("launcher_prefs", Context.MODE_PRIVATE) }
-    var themeMode by remember { mutableIntStateOf(prefs.getInt("theme_mode", 0)) }
+    val prefs       = remember { context.getSharedPreferences("launcher_prefs", Context.MODE_PRIVATE) }
+    var themeMode   by remember { mutableIntStateOf(prefs.getInt("theme_mode", 0)) }
+    var appLanguage by remember { mutableStateOf(prefs.getString("app_language", "ar") ?: "ar") }
 
     val isDark = when (themeMode) {
         1    -> false
@@ -133,12 +136,29 @@ fun LauncherScreen(
     }
     val colorScheme = if (isDark) darkColorScheme() else lightColorScheme()
 
-    // ── Pager setup ───────────────────────────────────────────────────────────
+    // ── Pager setup with responsive fling behavior ───────────────────────────
     // Root pager has exactly 2 pages:
     //  • Page 0: Home page (Clock, Hijri date, Pinned apps, Notes)
     //  • Page 1: App Drawer (Single unified Search bar, Categories, and App grid pages)
     val rootPagerState = rememberPagerState { 2 }
     val drawerPagerState = rememberPagerState { state.drawerPageCount }
+
+    val rootFlingBehavior = PagerDefaults.flingBehavior(
+        state = rootPagerState,
+        snapAnimationSpec = spring(
+            dampingRatio = Spring.DampingRatioNoBouncy,
+            stiffness = 750f
+        ),
+        snapPositionalThreshold = 0.2f
+    )
+    val drawerFlingBehavior = PagerDefaults.flingBehavior(
+        state = drawerPagerState,
+        snapAnimationSpec = spring(
+            dampingRatio = Spring.DampingRatioNoBouncy,
+            stiffness = 750f
+        ),
+        snapPositionalThreshold = 0.2f
+    )
 
     LaunchedEffect(homeEvents) {
         homeEvents?.collect {
@@ -206,15 +226,21 @@ fun LauncherScreen(
                 HorizontalPager(
                     state                   = rootPagerState,
                     modifier                = Modifier.fillMaxSize(),
+                    flingBehavior           = rootFlingBehavior,
                     beyondViewportPageCount = 1
                 ) { page ->
                     if (page == 0) {
                         HomePageContent(
                             state             = state,
                             themeMode         = themeMode,
+                            language          = appLanguage,
                             onThemeModeChange = { next ->
                                 themeMode = next
                                 prefs.edit().putInt("theme_mode", next).apply()
+                            },
+                            onLanguageChange  = { next ->
+                                appLanguage = next
+                                prefs.edit().putString("app_language", next).apply()
                             },
                             onBackup          = { backupLauncher.launch("nextui-launcher-backup.json") },
                             onRestore         = { restoreLauncher.launch(arrayOf("application/json")) },
@@ -227,16 +253,17 @@ fun LauncherScreen(
                         )
                     } else {
                         AppDrawerContent(
-                            state             = state,
-                            drawerPagerState  = drawerPagerState,
-                            navBarPadding     = navBarPadding,
-                            onSearchChange    = onSearchChange,
-                            onSelectCategory  = onSelectCategory,
-                            onLaunchApp       = onLaunchApp,
-                            onShowAppMenu     = { menuItem = it },
-                            onShowRecycleMenu = { recycleMenuItem = it },
-                            onOpenInStore     = onOpenInStore,
-                            onBackPress       = {
+                            state               = state,
+                            drawerPagerState    = drawerPagerState,
+                            drawerFlingBehavior = drawerFlingBehavior,
+                            navBarPadding       = navBarPadding,
+                            onSearchChange      = onSearchChange,
+                            onSelectCategory    = onSelectCategory,
+                            onLaunchApp         = onLaunchApp,
+                            onShowAppMenu       = { menuItem = it },
+                            onShowRecycleMenu   = { recycleMenuItem = it },
+                            onOpenInStore       = onOpenInStore,
+                            onBackPress         = {
                                 if (state.query.isNotBlank()) {
                                     focusManager.clearFocus()
                                     onSearchChange("")
@@ -520,7 +547,9 @@ private fun MenuActionRow(
 private fun HomePageContent(
     state:             LauncherUiState,
     themeMode:         Int,
+    language:          String,
     onThemeModeChange: (Int) -> Unit,
+    onLanguageChange:  (String) -> Unit,
     onBackup:          () -> Unit,
     onRestore:         () -> Unit,
     onOpenHiddenApps:  () -> Unit,
@@ -549,7 +578,7 @@ private fun HomePageContent(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment     = Alignment.Top
         ) {
-            HeaderSection(Modifier.weight(1f))
+            HeaderSection(Modifier.weight(1f), language = language)
 
             Box {
                 IconButton(onClick = { settingsMenuExpanded = true }) {
@@ -563,6 +592,19 @@ private fun HomePageContent(
                     expanded         = settingsMenuExpanded,
                     onDismissRequest = { settingsMenuExpanded = false }
                 ) {
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                if (language == "ar") "اللغة: العربية" else "Language: English"
+                            )
+                        },
+                        leadingIcon = { Icon(Icons.Rounded.Language, null) },
+                        onClick = {
+                            val next = if (language == "ar") "en" else "ar"
+                            onLanguageChange(next)
+                            settingsMenuExpanded = false
+                        }
+                    )
                     DropdownMenuItem(
                         text        = { Text("Create Group") },
                         leadingIcon = { Icon(Icons.Rounded.CreateNewFolder, null) },
@@ -661,7 +703,7 @@ private fun HomePageContent(
             }
         }
 
-        NotesSection(restoreKey = state.isRefreshing)
+        NotesSection(restoreKey = state.isRefreshing, language = language)
         Spacer(Modifier.weight(1f))
     }
 
@@ -724,7 +766,10 @@ private fun HomePageContent(
 
 // ── Header ────────────────────────────────────────────────────────────────────
 @Composable
-private fun HeaderSection(modifier: Modifier = Modifier) {
+private fun HeaderSection(
+    modifier: Modifier = Modifier,
+    language: String = "ar"
+) {
     var currentTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
 
     LaunchedEffect(Unit) {
@@ -743,30 +788,57 @@ private fun HeaderSection(modifier: Modifier = Modifier) {
         }
     }
 
-    val gregorianFmt = remember {
-        java.text.SimpleDateFormat("EEEE, d MMMM (M) yyyy", java.util.Locale.getDefault())
-    }
-    val arabicFmt = remember {
-        java.text.SimpleDateFormat("EEEE", java.util.Locale.forLanguageTag("ar"))
-    }
+    val isAr = language == "ar"
 
-    val dateStr   = remember(currentTime) { gregorianFmt.format(java.util.Date(currentTime)) }
-    val arabicDay = remember(currentTime) { arabicFmt.format(java.util.Date(currentTime)) }
+    val dayFmt = remember(language) {
+        if (isAr) {
+            java.text.SimpleDateFormat("EEEE", java.util.Locale.forLanguageTag("ar"))
+        } else {
+            java.text.SimpleDateFormat("EEEE", java.util.Locale.ENGLISH)
+        }
+    }
+    val dayName = remember(currentTime, language) { dayFmt.format(java.util.Date(currentTime)) }
 
-    val hijriStr = remember(currentTime) {
+    // Hijri date: DayName, Day MonthName (MonthNum) Year
+    val hijriStr = remember(currentTime, language) {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
             val islamicCal = android.icu.util.IslamicCalendar().apply { timeInMillis = currentTime }
             val day        = islamicCal.get(android.icu.util.IslamicCalendar.DAY_OF_MONTH)
             val month      = islamicCal.get(android.icu.util.IslamicCalendar.MONTH)
             val year       = islamicCal.get(android.icu.util.IslamicCalendar.YEAR)
-            val monthNames = arrayOf(
-                "Muharram", "Safar", "Rabi' I", "Rabi' II",
-                "Jumada I", "Jumada II", "Rajab", "Sha'ban",
-                "Ramadan", "Shawwal", "Dhu al-Qi'dah", "Dhu al-Hijjah"
-            )
-            val monthName = monthNames.getOrNull(month) ?: (month + 1).toString()
-            "$day $monthName (${month + 1}) $year AH"
+            if (isAr) {
+                val monthNames = arrayOf(
+                    "محرم", "صفر", "ربيع الأول", "ربيع الآخر",
+                    "جمادى الأولى", "جمادى الآخرة", "رجب", "شعبان",
+                    "رمضان", "شوال", "ذو القعدة", "ذو الحجة"
+                )
+                val monthName = monthNames.getOrNull(month) ?: (month + 1).toString()
+                "$dayName، $day $monthName (${month + 1}) $year هـ"
+            } else {
+                val monthNames = arrayOf(
+                    "Muharram", "Safar", "Rabi' I", "Rabi' II",
+                    "Jumada I", "Jumada II", "Rajab", "Sha'ban",
+                    "Ramadan", "Shawwal", "Dhu al-Qi'dah", "Dhu al-Hijjah"
+                )
+                val monthName = monthNames.getOrNull(month) ?: (month + 1).toString()
+                "$dayName, $day $monthName (${month + 1}) $year AH"
+            }
         } else ""
+    }
+
+    // Gregorian date: DayName, Day MonthName (MonthNum) Year
+    val dateStr = remember(currentTime, language) {
+        val gregCal = java.util.Calendar.getInstance().apply { timeInMillis = currentTime }
+        val gDay   = gregCal.get(java.util.Calendar.DAY_OF_MONTH)
+        val gMonth = gregCal.get(java.util.Calendar.MONTH) + 1
+        val gYear  = gregCal.get(java.util.Calendar.YEAR)
+        if (isAr) {
+            val mName = java.text.SimpleDateFormat("MMMM", java.util.Locale.forLanguageTag("ar")).format(java.util.Date(currentTime))
+            "$dayName، $gDay $mName ($gMonth) $gYear م"
+        } else {
+            val mName = java.text.SimpleDateFormat("MMMM", java.util.Locale.ENGLISH).format(java.util.Date(currentTime))
+            "$dayName, $gDay $mName ($gMonth) $gYear"
+        }
     }
 
     Row(
@@ -781,13 +853,13 @@ private fun HeaderSection(modifier: Modifier = Modifier) {
                 fontWeight = FontWeight.Bold,
                 color      = MaterialTheme.colorScheme.primary
             )
-            Text(dateStr, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
             if (hijriStr.isNotEmpty()) {
                 Text(hijriStr, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
             }
+            Text(dateStr, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
         }
         Text(
-            arabicDay,
+            dayName,
             style      = MaterialTheme.typography.headlineMedium,
             fontWeight = FontWeight.Bold,
             color      = MaterialTheme.colorScheme.primary
@@ -798,16 +870,17 @@ private fun HeaderSection(modifier: Modifier = Modifier) {
 // ── App Drawer content (Single unified Search bar, Categories, and App grid pages) ────
 @Composable
 private fun AppDrawerContent(
-    state:             LauncherUiState,
-    drawerPagerState:  androidx.compose.foundation.pager.PagerState,
-    navBarPadding:    Dp,
-    onSearchChange:    (String) -> Unit,
-    onSelectCategory: (String) -> Unit,
-    onLaunchApp:      (LauncherItemEntity) -> Unit,
-    onShowAppMenu:    (LauncherItemEntity) -> Unit,
-    onShowRecycleMenu: (LauncherItemEntity) -> Unit,
-    onOpenInStore:    (LauncherItemEntity) -> Unit,
-    onBackPress:       () -> Unit
+    state:               LauncherUiState,
+    drawerPagerState:    androidx.compose.foundation.pager.PagerState,
+    drawerFlingBehavior: androidx.compose.foundation.gestures.TargetedFlingBehavior,
+    navBarPadding:      Dp,
+    onSearchChange:      (String) -> Unit,
+    onSelectCategory:   (String) -> Unit,
+    onLaunchApp:        (LauncherItemEntity) -> Unit,
+    onShowAppMenu:      (LauncherItemEntity) -> Unit,
+    onShowRecycleMenu:   (LauncherItemEntity) -> Unit,
+    onOpenInStore:      (LauncherItemEntity) -> Unit,
+    onBackPress:         () -> Unit
 ) {
     val gridState      = rememberLazyGridState()
     var recycleBinOpen by remember { mutableStateOf(false) }
@@ -866,6 +939,7 @@ private fun AppDrawerContent(
             HorizontalPager(
                 state                   = drawerPagerState,
                 modifier                = Modifier.fillMaxSize(),
+                flingBehavior           = drawerFlingBehavior,
                 beyondViewportPageCount = 2,
                 userScrollEnabled       = !isSearching
             ) { pageIndex ->
@@ -873,6 +947,7 @@ private fun AppDrawerContent(
                 if (pageApps != null) {
                     LazyVerticalGrid(
                         columns           = GridCells.Fixed(4),
+                        userScrollEnabled = false,
                         modifier          = Modifier.fillMaxSize(),
                         contentPadding    = PaddingValues(
                             start  = 8.dp,
@@ -1063,70 +1138,130 @@ private fun GlobalSearchBar(
     }
 }
 
-// ── Notes section ─────────────────────────────────────────────────────────────
+// ── Notes data model & section ────────────────────────────────────────────────
+private data class LauncherNote(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val text: String,
+    val targetTimeMillis: Long? = null
+)
+
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun NotesSection(restoreKey: Boolean = false) {
+private fun NotesSection(
+    restoreKey: Boolean = false,
+    language: String = "ar"
+) {
     val context = LocalContext.current
     val prefs   = remember { context.getSharedPreferences("launcher_notes", Context.MODE_PRIVATE) }
+    val isAr    = language == "ar"
 
-    fun loadNotes(): List<String> {
+    fun loadNotes(): List<LauncherNote> {
         val str = prefs.getString("notes_data", "") ?: ""
         return try {
             if (str.startsWith("[")) {
                 val arr = org.json.JSONArray(str)
-                (0 until arr.length()).map { arr.getString(it) }.filter { it.isNotBlank() }
+                (0 until arr.length()).mapNotNull { i ->
+                    val elem = arr.get(i)
+                    if (elem is org.json.JSONObject) {
+                        LauncherNote(
+                            id = elem.optString("id", java.util.UUID.randomUUID().toString()),
+                            text = elem.getString("text"),
+                            targetTimeMillis = if (elem.has("targetTimeMillis") && !elem.isNull("targetTimeMillis")) elem.getLong("targetTimeMillis") else null
+                        )
+                    } else if (elem is String && elem.isNotBlank()) {
+                        LauncherNote(text = elem)
+                    } else null
+                }
             } else {
-                str.split("|~|").filter { it.isNotBlank() }
+                str.split("|~|").filter { it.isNotBlank() }.map { LauncherNote(text = it) }
             }
         } catch (_: Exception) { emptyList() }
     }
 
     var notes by remember(restoreKey) { mutableStateOf(loadNotes()) }
+    var currentNow by remember { mutableLongStateOf(System.currentTimeMillis()) }
 
-    fun saveNotes(newNotes: List<String>) {
+    fun saveNotes(newNotes: List<LauncherNote>) {
         notes = newNotes
         val arr = org.json.JSONArray()
-        newNotes.forEach { arr.put(it) }
+        newNotes.forEach { note ->
+            val obj = org.json.JSONObject().apply {
+                put("id", note.id)
+                put("text", note.text)
+                if (note.targetTimeMillis != null) {
+                    put("targetTimeMillis", note.targetTimeMillis)
+                }
+            }
+            arr.put(obj)
+        }
         prefs.edit().putString("notes_data", arr.toString()).apply()
     }
 
-    var isAdding     by remember { mutableStateOf(false) }
-    var inputText    by remember { mutableStateOf("") }
-    var noteToDelete by remember { mutableStateOf<String?>(null) }
-    var editingIndex by remember { mutableIntStateOf(-1) }
-    var editingText  by remember { mutableStateOf("") }
+    // Live 1-second countdown ticker for active timers
+    val hasTimers = remember(notes) { notes.any { it.targetTimeMillis != null } }
+    LaunchedEffect(hasTimers) {
+        if (hasTimers) {
+            while (true) {
+                kotlinx.coroutines.delay(1000L)
+                currentNow = System.currentTimeMillis()
+            }
+        }
+    }
 
-    Column(modifier = Modifier
-        .fillMaxWidth()
-        .padding(vertical = 12.dp)
+    fun formatRemaining(targetMillis: Long, now: Long): Pair<String, Boolean> {
+        val diff = targetMillis - now
+        if (diff <= 0) return Pair("00:00:00", true)
+        val totalSec = diff / 1000
+        val hours = totalSec / 3600
+        val mins  = (totalSec % 3600) / 60
+        val secs  = totalSec % 60
+        val formatted = if (hours >= 24) {
+            val days = hours / 24
+            val remH = hours % 24
+            String.format(java.util.Locale.US, "%dd %02d:%02d:%02d", days, remH, mins, secs)
+        } else {
+            String.format(java.util.Locale.US, "%02d:%02d:%02d", hours, mins, secs)
+        }
+        return Pair(formatted, false)
+    }
+
+    var isAdding       by remember { mutableStateOf(false) }
+    var inputText      by remember { mutableStateOf("") }
+    var noteToDelete   by remember { mutableStateOf<LauncherNote?>(null) }
+    var editingNoteId  by remember { mutableStateOf<String?>(null) }
+    var editingText    by remember { mutableStateOf("") }
+    var timeDialogNote by remember { mutableStateOf<LauncherNote?>(null) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 12.dp)
     ) {
-        notes.forEachIndexed { index, note ->
-            if (editingIndex == index) {
+        notes.forEach { note ->
+            if (editingNoteId == note.id) {
                 OutlinedTextField(
                     value         = editingText,
                     onValueChange = { editingText = it },
                     modifier      = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 8.dp, vertical = 4.dp),
-                    placeholder   = { Text("Edit note...") },
+                    placeholder   = { Text(if (isAr) "تعديل الملاحظة..." else "Edit note...") },
                     trailingIcon  = {
                         IconButton(onClick = {
                             if (editingText.isNotBlank()) {
-                                val newList = notes.toMutableList()
-                                newList[index] = editingText.trim()
-                                saveNotes(newList)
+                                val updated = notes.map { if (it.id == note.id) it.copy(text = editingText.trim()) else it }
+                                saveNotes(updated)
                             }
-                            editingIndex = -1
+                            editingNoteId = null
                         }) { Icon(Icons.Rounded.Check, "Save") }
                     },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = {
                         if (editingText.isNotBlank()) {
-                            val newList = notes.toMutableList()
-                            newList[index] = editingText.trim()
-                            saveNotes(newList)
+                            val updated = notes.map { if (it.id == note.id) it.copy(text = editingText.trim()) else it }
+                            saveNotes(updated)
                         }
-                        editingIndex = -1
+                        editingNoteId = null
                     }),
                     singleLine = true,
                     shape      = RoundedCornerShape(12.dp)
@@ -1146,15 +1281,58 @@ private fun NotesSection(restoreKey: Boolean = false) {
                             .size(22.dp)
                             .clickable { noteToDelete = note }
                     )
-                    Spacer(Modifier.width(12.dp))
+                    Spacer(Modifier.width(10.dp))
                     Text(
-                        note,
+                        note.text,
                         style    = MaterialTheme.typography.bodyMedium,
                         color    = MaterialTheme.colorScheme.onBackground,
                         modifier = Modifier
                             .weight(1f)
-                            .clickable { editingIndex = index; editingText = note }
+                            .clickable { editingNoteId = note.id; editingText = note.text }
                     )
+                    Spacer(Modifier.width(8.dp))
+
+                    if (note.targetTimeMillis != null) {
+                        val (timerStr, isExpired) = formatRemaining(note.targetTimeMillis, currentNow)
+                        Surface(
+                            color    = if (isExpired) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.primaryContainer,
+                            shape    = RoundedCornerShape(10.dp),
+                            modifier = Modifier.clickable { timeDialogNote = note }
+                        ) {
+                            Row(
+                                verticalAlignment     = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                modifier              = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Icon(
+                                    if (isExpired) Icons.Rounded.NotificationsActive else Icons.Rounded.Timer,
+                                    null,
+                                    modifier = Modifier.size(13.dp),
+                                    tint     = if (isExpired) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    if (isExpired) {
+                                        if (isAr) "$timerStr (انتهى)" else "$timerStr (Ended)"
+                                    } else timerStr,
+                                    style      = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color      = if (isExpired) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            }
+                        }
+                    } else {
+                        IconButton(
+                            onClick  = { timeDialogNote = note },
+                            modifier = Modifier.size(30.dp)
+                        ) {
+                            Icon(
+                                Icons.Rounded.AccessTime,
+                                contentDescription = if (isAr) "إضافة وقت" else "Add time",
+                                modifier           = Modifier.size(18.dp),
+                                tint               = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1166,17 +1344,17 @@ private fun NotesSection(restoreKey: Boolean = false) {
                 modifier      = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 8.dp, vertical = 4.dp),
-                placeholder   = { Text("Add note...") },
+                placeholder   = { Text(if (isAr) "أضف ملاحظة..." else "Add note...") },
                 trailingIcon  = {
                     IconButton(onClick = {
-                        if (inputText.isNotBlank()) saveNotes(notes + inputText.trim())
+                        if (inputText.isNotBlank()) saveNotes(notes + LauncherNote(text = inputText.trim()))
                         inputText = ""
                         isAdding  = false
                     }) { Icon(Icons.Rounded.Check, "Save") }
                 },
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = {
-                    if (inputText.isNotBlank()) saveNotes(notes + inputText.trim())
+                    if (inputText.isNotBlank()) saveNotes(notes + LauncherNote(text = inputText.trim()))
                     inputText = ""
                     isAdding  = false
                 }),
@@ -1198,7 +1376,7 @@ private fun NotesSection(restoreKey: Boolean = false) {
                 )
                 Spacer(Modifier.width(12.dp))
                 Text(
-                    "Add note...",
+                    if (isAr) "أضف ملاحظة..." else "Add note...",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -1206,21 +1384,136 @@ private fun NotesSection(restoreKey: Boolean = false) {
         }
     }
 
+    // ── Time Picker Dialog for Notes ─────────────────────────────────────────
+    timeDialogNote?.let { targetNote ->
+        AlertDialog(
+            onDismissRequest = { timeDialogNote = null },
+            title = {
+                Row(
+                    verticalAlignment     = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(Icons.Rounded.Timer, null, tint = MaterialTheme.colorScheme.primary)
+                    Text(if (isAr) "مؤقت الملاحظة" else "Note Timer")
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        targetNote.text,
+                        fontWeight = FontWeight.SemiBold,
+                        style      = MaterialTheme.typography.bodyMedium,
+                        color      = MaterialTheme.colorScheme.onSurface
+                    )
+
+                    Text(
+                        if (isAr) "إضافة وقت سريع:" else "Quick presets:",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+
+                    FlowRow(
+                        modifier              = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement   = Arrangement.spacedBy(4.dp)
+                    ) {
+                        listOf(
+                            (15 * 60 * 1000L) to (if (isAr) "+15 د" else "+15m"),
+                            (30 * 60 * 1000L) to (if (isAr) "+30 د" else "+30m"),
+                            (60 * 60 * 1000L) to (if (isAr) "+1 س" else "+1h"),
+                            (3 * 3600 * 1000L) to (if (isAr) "+3 س" else "+3h"),
+                            (24 * 3600 * 1000L) to (if (isAr) "+غداً" else "+24h")
+                        ).forEach { (duration, label) ->
+                            SuggestionChip(
+                                onClick = {
+                                    val target = System.currentTimeMillis() + duration
+                                    val updated = notes.map { if (it.id == targetNote.id) it.copy(targetTimeMillis = target) else it }
+                                    saveNotes(updated)
+                                    timeDialogNote = null
+                                },
+                                label = { Text(label) }
+                            )
+                        }
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            val nowCal = java.util.Calendar.getInstance()
+                            android.app.DatePickerDialog(
+                                context,
+                                { _, year, month, dayOfMonth ->
+                                    android.app.TimePickerDialog(
+                                        context,
+                                        { _, hourOfDay, minute ->
+                                            val finalCal = java.util.Calendar.getInstance().apply {
+                                                set(year, month, dayOfMonth, hourOfDay, minute, 0)
+                                            }
+                                            val target = finalCal.timeInMillis
+                                            val updated = notes.map { if (it.id == targetNote.id) it.copy(targetTimeMillis = target) else it }
+                                            saveNotes(updated)
+                                            timeDialogNote = null
+                                        },
+                                        nowCal.get(java.util.Calendar.HOUR_OF_DAY),
+                                        nowCal.get(java.util.Calendar.MINUTE),
+                                        false
+                                    ).show()
+                                },
+                                nowCal.get(java.util.Calendar.YEAR),
+                                nowCal.get(java.util.Calendar.MONTH),
+                                nowCal.get(java.util.Calendar.DAY_OF_MONTH)
+                            ).show()
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Rounded.Schedule, null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(if (isAr) "تحديد وقت وتاريخ محدد" else "Pick exact Date & Time")
+                    }
+
+                    if (targetNote.targetTimeMillis != null) {
+                        TextButton(
+                            onClick = {
+                                val updated = notes.map { if (it.id == targetNote.id) it.copy(targetTimeMillis = null) else it }
+                                saveNotes(updated)
+                                timeDialogNote = null
+                            },
+                            modifier = Modifier.align(Alignment.CenterHorizontally)
+                        ) {
+                            Text(
+                                if (isAr) "إلغاء المؤقت" else "Remove timer",
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { timeDialogNote = null }) {
+                    Text(if (isAr) "إغلاق" else "Close")
+                }
+            }
+        )
+    }
+
+    // ── Delete confirmation ───────────────────────────────────────────────────
     noteToDelete?.let { note ->
         AlertDialog(
             onDismissRequest = { noteToDelete = null },
-            title            = { Text("Delete note?") },
-            text             = { Text(note) },
+            title            = { Text(if (isAr) "حذف الملاحظة؟" else "Delete note?") },
+            text             = { Text(note.text) },
             confirmButton    = {
                 TextButton(onClick = {
-                    saveNotes(notes.filter { it != note })
+                    saveNotes(notes.filter { it.id != note.id })
                     noteToDelete = null
                 }) {
-                    Text("Delete", color = MaterialTheme.colorScheme.error)
+                    Text(if (isAr) "حذف" else "Delete", color = MaterialTheme.colorScheme.error)
                 }
             },
             dismissButton = {
-                TextButton(onClick = { noteToDelete = null }) { Text("Cancel") }
+                TextButton(onClick = { noteToDelete = null }) {
+                    Text(if (isAr) "إلغاء" else "Cancel")
+                }
             }
         )
     }
